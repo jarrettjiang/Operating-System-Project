@@ -221,6 +221,7 @@ header Kernel
     fields
       pid: int                      -- The process ID
       parentsPid: int               -- The pid of the parent of this process
+      parent: ptr to ProcessControlBlock -- add to follow parent
       status: int                   -- ACTIVE, ZOMBIE, or FREE
       myThread: ptr to Thread       -- Each process has one thread
       exitStatus: int               -- The value passed to Sys_Exit

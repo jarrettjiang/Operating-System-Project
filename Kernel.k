@@ -241,7 +241,7 @@ code Kernel
    fileManager.Close(exeFile)
    pPCB.workingDir = fileSystem.rootDirectory.NewReference()
    initUserStackTop = pPCB.addrSpace.numberOfPages*PAGE_SIZE
-   initSystemStackTop = (& currentThread.systemStack[SYSTEM_STACK_SIZE-1]) asInteger
+   initSystemStackTop = &(currentThread.systemStack[SYSTEM_STACK_SIZE-1]) asInteger
    oldIntStat = SetInterruptsTo (DISABLED)
    --initialize the page table registers for this logical address space
    pPCB.addrSpace.SetToThisPageTable()
@@ -828,6 +828,7 @@ code Kernel
           status = FREE
           addrSpace = new AddrSpace
           addrSpace.Init ()
+          parent = null
 -- Uncomment this code later...
 /*
           fileDescriptor = new array of ptr to OpenFile
@@ -1779,8 +1780,58 @@ code Kernel
       --
       -- This function creates a new process which is a copy of the current proces
       --
+      var pThread: ptr to Thread
+          paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+          i, newPageAddr, oldPageAddr, oldUserPC: int
       print ("Handle_Sys_Fork invoked!") nl() nl()
-      return 1000
+      pThread = ThreadManager.GetANewThread()
+      pThread.Init("Child")
+      pThread.myProcess = ProcessManager.GetANewProcess()
+      pThread.myProcess.Init()
+      pThread.myProcess.myThread = pThread
+      pThread.myProcess.parentsPid = currentThread.myProcess.pid
+      pThread.myProcess.parent = paddr
+
+      pThread.myProcess.addrSpace = *paddr
+      SaveUserRegs (&currentThread.userRegs[0])
+      pThread.stackTop = &(pThread.systemStack[SYSTEM_STACK_SIZE-1])
+      FrameManager.GetNewFrames(pThread.myProcess.addrSpace,
+                                           paddr.numberOfPages)
+      for i=0 to pThread.myProcess.addrSpace.numberOfPages - 1
+        oldPageAddr = paddr.ExtractFrameAddr(i)
+        newPageAddr = pThread.myProcess.addrSpace.ExtractFrameAddr(i)
+        MemoryCopy(newPageAddr, oldPageAddr, PAGE_SIZE)
+        if paddr.IsWritable(i)
+             pThread.myProcess.addrSpace.SetWritable(i)
+        else
+             pThread.myProcess.addrSpace.ClearWritable(i)
+        endIf
+      currentInterruptStatus = ENABLED
+      oldUserPC = GetOldUserPCFromSystemStack()
+      -- Don't forget to copy the fileDescriptor array here
+      pThread.Fork(ResumeChildAfterFork, oldUserPC)
+      return pThread.myProcess.pid
+    endFunction
+
+-----------------------------  ResumeChildAfterFork  ---------------------------------
+
+  function ResumeChildAfterFork (userPC: int) returns int
+      --
+      -- This function runs the user process
+      -- 
+      var 
+          paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+          initUserStackTop,initSystemStackTop: int
+      initUserStackTop = currentThread.numberOfPages*PAGE_SIZE
+      initSystemStackTop = &(currentThread.systemStack[SYSTEM_STACK_SIZE-1])
+      currentInterruptStatus = DISABLED
+      paddr.SetToThisPageTable()
+      if(currentThread.myProcess.parentsPid != 0)
+         RestoreUserRegs (&currentThread.myProcess.parent.userRegs[0])
+      endIf
+      currentThread.isUserThread = true
+      BecomeUserThread(initUserStackTop,userPC,initSysStackTop,ret)
+      return 0
     endFunction
 
 -----------------------------  Handle_Sys_Join  ---------------------------------
