@@ -241,7 +241,7 @@ code Kernel
    fileManager.Close(exeFile)
    pPCB.workingDir = fileSystem.rootDirectory.NewReference()
    initUserStackTop = pPCB.addrSpace.numberOfPages*PAGE_SIZE
-   initSystemStackTop = &(currentThread.systemStack[SYSTEM_STACK_SIZE-1]) asInteger
+   initSystemStackTop = (&currentThread.systemStack[SYSTEM_STACK_SIZE-1]) asInteger
    oldIntStat = SetInterruptsTo (DISABLED)
    --initialize the page table registers for this logical address space
    pPCB.addrSpace.SetToThisPageTable()
@@ -1000,9 +1000,6 @@ code Kernel
           processManagerLock.Unlock()
         endMethod
 
-
-    endBehavior
-
      ----------  ProcessManager . TurnIntoZombie  ----------
 
       method TurnIntoZombie (p: ptr to ProcessControlBlock)
@@ -1010,6 +1007,7 @@ code Kernel
         -- This method is passed p, a pointer to a process;  
         -- It turns it into a zombie ­ dead but not gone
         --
+        var i: int
         processManagerLock.Lock()
         for i = 0 to MAX_NUMBER_OF_PROCESSES
             if processTable[i].pid != -1
@@ -1034,8 +1032,6 @@ code Kernel
         endIf
         processManagerLock.Unlock()
         endMethod
-
-    endBehavior
 
      ----------  ProcessManager . WaitForZombie  ----------
 
@@ -1083,12 +1079,12 @@ code Kernel
       oldStat = SetInterruptsTo(DISABLED)
       pProcess.myThread = null
       currentThread.myProcess = null
-      currentThread.isUserThread = flase
+      currentThread.isUserThread = false
       oldStat = SetInterruptsTo(oldStat)
       ------ remember to close any open files here
-      pProcess.workingDir.numberOfUsers = pPCB.workingDir.numberOfUsers - 1
-      frameManager.ReturnAllFrames(pProcess.addrSpace)
-      pProcess.TurnIntoZombie()
+      pProcess.workingDir.numberOfUsers = pProcess.workingDir.numberOfUsers - 1
+      frameManager.ReturnAllFrames(&pProcess.addrSpace)
+      processManager.TurnIntoZombie(pProcess)
       ThreadFinish()
     endFunction
 
@@ -1853,18 +1849,18 @@ code Kernel
           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
           i, newPageAddr, oldPageAddr, oldUserPC: int
       print ("Handle_Sys_Fork invoked!") nl() nl()
-      pThread = ThreadManager.GetANewThread()
+      pThread = threadManager.GetANewThread()
       pThread.Init("Child")
-      pThread.myProcess = ProcessManager.GetANewProcess()
+      pThread.myProcess = processManager.GetANewProcess()
       pThread.myProcess.Init()
       pThread.myProcess.myThread = pThread
       pThread.myProcess.parentsPid = currentThread.myProcess.pid
-      pThread.myProcess.parent = paddr
+      pThread.myProcess.parent = currentThread.myProcess
 
-      pThread.myProcess.addrSpace = *paddr
+      -- pThread.myProcess.addrSpace = *paddr
       SaveUserRegs (&currentThread.userRegs[0])
       pThread.stackTop = &(pThread.systemStack[SYSTEM_STACK_SIZE-1])
-      FrameManager.GetNewFrames(pThread.myProcess.addrSpace,
+      frameManager.GetNewFrames(&pThread.myProcess.addrSpace,
                                            paddr.numberOfPages)
       for i=0 to pThread.myProcess.addrSpace.numberOfPages - 1
         oldPageAddr = paddr.ExtractFrameAddr(i)
@@ -1875,6 +1871,7 @@ code Kernel
         else
              pThread.myProcess.addrSpace.ClearWritable(i)
         endIf
+      endFor
       currentInterruptStatus = ENABLED
       oldUserPC = GetOldUserPCFromSystemStack()
       -- Don't forget to copy the fileDescriptor array here
@@ -1884,23 +1881,22 @@ code Kernel
 
 -----------------------------  ResumeChildAfterFork  ---------------------------------
 
-  function ResumeChildAfterFork (userPC: int) returns int
+  function ResumeChildAfterFork (userPC: int)
       --
       -- This function runs the user process
       -- 
       var 
           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
           initUserStackTop,initSystemStackTop: int
-      initUserStackTop = currentThread.numberOfPages*PAGE_SIZE
-      initSystemStackTop = &(currentThread.systemStack[SYSTEM_STACK_SIZE-1])
+      initUserStackTop = paddr.numberOfPages*PAGE_SIZE
+      initSystemStackTop = (&currentThread.systemStack[SYSTEM_STACK_SIZE-1]) asInteger
       currentInterruptStatus = DISABLED
       paddr.SetToThisPageTable()
       if(currentThread.myProcess.parentsPid != 0)
-         RestoreUserRegs (&currentThread.myProcess.parent.userRegs[0])
+         RestoreUserRegs (&currentThread.myProcess.parent.myThread.userRegs[0])
       endIf
       currentThread.isUserThread = true
-      BecomeUserThread(initUserStackTop,userPC,initSysStackTop,ret)
-      return 0
+      BecomeUserThread(initUserStackTop,userPC,initSystemStackTop,0)
     endFunction
 
 -----------------------------  Handle_Sys_Join  ---------------------------------

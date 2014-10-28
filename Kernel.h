@@ -7,7 +7,7 @@ header Kernel
 
   const
 
-    INIT_NAME = "TestProgram1"
+    INIT_NAME = "TestProgram3"
 
     SYSTEM_STACK_SIZE = 1000       -- in words
     STACK_SENTINEL = 0x24242424    -- in ASCII, this is "$$$$"
@@ -18,8 +18,8 @@ header Kernel
 
     PAGE_SIZE = 8192                                  -- in hex: 0x0000 2000
     PHYSICAL_ADDRESS_OF_FIRST_PAGE_FRAME = 1048576    -- in hex: 0x0010 0000
-    --NUMBER_OF_PHYSICAL_PAGE_FRAMES = 512              -- in hex: 0x0000 0200
-    NUMBER_OF_PHYSICAL_PAGE_FRAMES = 100               -- for testing only
+    NUMBER_OF_PHYSICAL_PAGE_FRAMES = 512              -- in hex: 0x0000 0200
+    --NUMBER_OF_PHYSICAL_PAGE_FRAMES = 100               -- for testing only
     
     -- Define for assignment4
     MAX_ARRAY_NUMBER = 100
@@ -254,8 +254,8 @@ header Kernel
       GetANewProcess () returns ptr to ProcessControlBlock
       FreeProcess (p: ptr to ProcessControlBlock)
       --FindProcess (pid: int) returns ptr to ProcessControlBlock
-      --TurnIntoZombie (p: ptr to ProcessControlBlock)
-      --WaitForZombie (proc: ptr to ProcessControlBlock) returns int
+      TurnIntoZombie (p: ptr to ProcessControlBlock)
+      WaitForZombie (proc: ptr to ProcessControlBlock) returns int
   endClass
 
   -----------------------------  FrameManager  ---------------------------------
