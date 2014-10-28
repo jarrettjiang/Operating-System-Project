@@ -312,7 +312,7 @@ header Kernel
   endClass
 
   -----------------------------  DiskDriver  ---------------------------------
-  --
+ --
   --  There is only one instance of this class.
   --
   class DiskDriver
@@ -406,8 +406,8 @@ header Kernel
       WriteFile (file: ptr to OpenFile, userBuffer: ptr to char,
       		sizeInBytes: int) returns int
 
-      CreateFile (filename: String, mode: int) returns int
-
+      CreateFile (dir : ptr to OpenFile, filename: String, flags:int, mode: int)
+                  returns ptr to OpenFile
       MakeDir (dirname: String) returns int
       RemoveDir (dirname: String) returns int
       
@@ -472,7 +472,7 @@ header Kernel
     methods
       Init ()
       Print ()
-      ReadSector (newSector: int) returns bool
+      ReadSector (newSector: int, allocateNew: bool) returns bool
       Flush ()
       Release (lock: ptr to Mutex)
       
@@ -488,9 +488,10 @@ header Kernel
       fcb: ptr to FileControlBlock   -- null = not open
       numberOfUsers: int             -- count of Processes pointing here
       addPos: int    		     -- byte in directory to add last failed lookup
+      flags: int		     -- How opened, O_READ / O_WRITE 
     methods
       Print ()
-      Init (fKind: int, fFcb: ptr to FileControlBlock)
+      Init (fKind: int, fFcb: ptr to FileControlBlock, openFlags: int)
 
       -- Returns a new reference to self and increments numberOfUsers
       NewReference () returns ptr to OpenFile

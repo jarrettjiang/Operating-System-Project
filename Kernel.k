@@ -2451,28 +2451,31 @@ code Kernel
 	  -- Get the inode number
 	  iNum = fileSystem.NameToInodeNum (filename, dir)
 	  if iNum < 0
+	     -- Should we create a file here?  (Unimplemented)
 	     return null
 	  endIf
+
+	  -- Is there an existing file when we must create?  (Unimplemented)
 
           -- First, get an FCB that points to the file.
           -- This will increment fcb.numberOfUsers.
           fcb = fileManager.GetFCB (iNum)
-          if fcb == null
+          if fcb == null 
             return null
           endIf
 
-	  -- Process open() flags && permission checking
-	  -- UNIMPLEMENTED
+	  -- Process Open flags (Unimplemented)
 
           -- Next, allocate an OpenFile, waiting if necessary.
-          open = self.GetAnOpenFile(true)
+	  -- Might want to change this! (return an error if no openfile)
+          open = self.GetAnOpenFile(true) 
 
           -- Connect it to this FCB and set its "numberOfUsers" count.
           fileManagerLock.Lock()
 	  if (fcb.inode.mode & TYPE_FILE) == TYPE_FILE
-             open.Init (FILE, fcb)
+             open.Init (FILE, fcb, flags & 3)
 	  else
-	     open.Init (DIRECTORY, fcb)
+	     open.Init (DIRECTORY, fcb, flags & 3)
 	  endIf
 
           -- Release FileManagerLock and return a pointer to the OpenFile object
@@ -2584,9 +2587,9 @@ code Kernel
           endIf
           fileManagerLock.Lock()
           open.fcb.Flush()
-          fcb = open.fcb
           open.numberOfUsers = open.numberOfUsers - 1
           if open.numberOfUsers <= 0
+            fcb = open.fcb
             openFileFreeList.AddToEnd (open)
             anOpenFileBecameFree.Signal (& fileManagerLock)
             fcb.Release(&fileManagerLock)
@@ -2631,7 +2634,7 @@ code Kernel
             -- printIntVar ("  offset", offset)
             -- printHexVar ("        ", offset)
             if fcb.relativeSectorInBuffer != sector
-	        if !open.fcb.ReadSector(sector) 
+	        if !open.fcb.ReadSector(sector,false) 
 		   return false
 		endIf
             endIf
@@ -2692,12 +2695,14 @@ code Kernel
             -- printIntVar ("  sector", sector)
             -- printIntVar ("  offset", offset)
             bytesToMove = Min (numBytes, PAGE_SIZE - offset)
-            if offset == 0 && bytesToMove == PAGE_SIZE
+            if offset == 0 && bytesToMove == PAGE_SIZE 
+	       && bytePos < open.fcb.inode.fsize
               -- No need to read the sector first
               open.fcb.Flush()
             elseIf fcb.relativeSectorInBuffer != sector
 	      -- Read the sector before we do a partial write
-	      if !fcb.ReadSector (sector)
+	      if !fcb.ReadSector (sector, true)
+	         fileManagerLock.Unlock()
 	         return false
 	      endIf
             endIf
@@ -2888,7 +2893,7 @@ code Kernel
 	      if elDir == null
 		 return null
 	      endIf
-	      elDir.Init(DIRECTORY,fcb)
+	      elDir.Init(DIRECTORY,fcb,O_READ)
 
 	      -- Update for next element
 	      sIx = eIx+1
@@ -2930,7 +2935,12 @@ code Kernel
 	if (curDir == null)
 	    return -1
         endIf
-	
+
+	if (filename arraySize - lastElStart > MAX_STRING_SIZE) 
+	    fileManager.Close(curDir)
+	    return -1
+	endIf		
+
 	-- Do the lookup(s) ....
 	*((&lastElName) asPtrTo int) = filename arraySize - lastElStart
 	for ix = 0 to filename arraySize - lastElStart -1
@@ -2938,14 +2948,13 @@ code Kernel
 	endFor
 	--print ("NameToInodeNum: last element is: ") print (&lastElName) nl()
 	dirEnt = curDir.Lookup(&lastElName)
-
-	if dirEnt == null
-	   fileManager.Close(curDir)
-	   return -1
-	endIf
-	retVal = dirEnt.inodeNum
 	fileManager.Close(curDir)
 
+	if dirEnt == null
+	   return -1
+	endIf
+
+	retVal = dirEnt.inodeNum
 	return retVal
       endMethod
 
@@ -2955,20 +2964,24 @@ code Kernel
           idata: InodeData
         fsLock.Lock()
         retVal = i_bitmap.FindZeroAndSet()
-	self.SaveSuper()
-	fsLock.Unlock()
-	idata = new InodeData
-	idata.number = retVal
-	idata.nlinks = 0
-	idata.mode = 0
-	idata.fsize = 0
-	idata.balloc = 0
-	idata.direct = new array [10] of int { 10 of 0 }
-	idata.indir1 = 0
-	idata.indir2 = 0
-	idata.dirty = true
-	idata.indSec = -1
-	idata.WriteInode()
+	if retVal >= 0 
+	  self.SaveSuper()
+	  fsLock.Unlock()
+	  idata = new InodeData
+	  idata.number = retVal
+	  idata.nlinks = 0
+	  idata.mode = 0
+	  idata.fsize = 0
+	  idata.balloc = 0
+	  idata.direct = new array [10] of int { 10 of 0 }
+	  idata.indir1 = 0
+	  idata.indir2 = 0
+	  idata.dirty = true
+	  idata.indSec = -1
+	  idata.WriteInode()
+	else
+	  fsLock.Unlock()
+	endIf
 	return retVal
       endMethod
 
@@ -3001,23 +3014,23 @@ code Kernel
       --------------- ToyFs . ReadFile  ----------------
     method ReadFile (file: ptr to OpenFile, userBuffer: ptr to char,
                      sizeInBytes: int)  returns int
-         FatalError ("ToyFs . ReadFile Not Implemented.")
-         return -1
-      endMethod
+        FatalError ("ToyFs . ReadFile Not Implemented.")
+        return -1
+    endMethod
 
       --------------- ToyFs . WriteFile  ----------------
 
     method  WriteFile (file: ptr to OpenFile, userBuffer: ptr to char,
                        sizeInBytes: int)  returns int
-         FatalError ("ToyFs . WriteFile Not Implemented.")
-         return -1
+        FatalError ("ToyFs . WriteFile Not Implemented.")
+        return -1
       endMethod
 
       --------------- ToyFs . CreateFile  ----------------
-
-    method CreateFile (filename: String, mode: int) returns int
-         FatalError ("ToyFs . CreateFile Not Implemented.")
-         return -1
+    method CreateFile (dir : ptr to OpenFile, filename: String, flags: int, mode: int)
+           returns ptr to OpenFile
+        FatalError ("ToyFs . CreateFile Not Implemented.")
+        return null
       endMethod
 
       --------------- ToyFs . MakeDir  ----------------
@@ -3048,7 +3061,6 @@ code Kernel
         FatalError ("ToyFs . MakeDir Not Implemented.")
          return -1
       endMethod
-
 
   endBehavior
 
@@ -3246,8 +3258,8 @@ code Kernel
       ----------- InodeData . AllocateNewSector () -------------
 
       method AllocateNewSector (logicalSector: int) returns bool
-        -- Implementation not supplied ....
-        return false
+          -- Implementation not supplied ....
+          return false
       endMethod
 
       ----------- InodeData . GetIndirect () -------------
@@ -3329,7 +3341,7 @@ code Kernel
 
       ----------  FileControlBlock . ReadSector  ----------
 
-      method ReadSector (newSector: int) returns bool
+      method ReadSector (newSector: int, allocateNew: bool ) returns bool
  	var dataSector: int       
 	  if (newSector == relativeSectorInBuffer)
 	     return true
@@ -3342,7 +3354,11 @@ code Kernel
 	  dataSector = inode.GetDataSectorNumber(relativeSectorInBuffer)
 	  if dataSector == 0
 	     MemoryZero (bufferPtr, PAGE_SIZE)
-	     return  inode.AllocateNewSector(newSector)
+	     if allocateNew
+	         return  inode.AllocateNewSector(newSector)
+             else
+                 return  true
+             endIf
 	  else 
              diskDriver.SynchReadSector (
                         dataSector + fileSystem.dataSecOffset, 1, bufferPtr)
@@ -3398,12 +3414,13 @@ code Kernel
 
       ----------  OpenFile . Init  ----------
 
-     method Init (fKind: int, fFcb: ptr to FileControlBlock)
+     method Init (fKind: int, fFcb: ptr to FileControlBlock, openFlags: int)
      	  kind = fKind
 	  fcb  = fFcb
           currentPos = 0
 	  numberOfUsers = 1
 	  addPos = -1
+	  flags = openFlags
        endMethod
 
 
@@ -3547,7 +3564,7 @@ code Kernel
           i = textSizeInPages + dataSizeInPages + bssSizeInPages +
               USER_STACK_SIZE_IN_PAGES + NUMBER_OF_ENVIRONMENT_PAGES
 
-          /*****          
+          /*****
           printIntVar ("NUMBER_OF_ENVIRONMENT_PAGES", NUMBER_OF_ENVIRONMENT_PAGES)
           printIntVar ("USER_STACK_SIZE_IN_PAGES", USER_STACK_SIZE_IN_PAGES)
           printIntVar ("textSizeInPages", textSizeInPages)
@@ -3565,6 +3582,7 @@ code Kernel
             printIntVar ("LoadExecutable: MAX_PAGES_PER_VIRT_SPACE", MAX_PAGES_PER_VIRT_SPACE)
             return -1
           endIf
+
           frameManager.GetNewFrames (addrSpace, i)
 
           --print ("LoadExecutable: The address space just allocated...\n")
@@ -3572,7 +3590,7 @@ code Kernel
 
           -- Read and check the separator...
           if  self.ReadInt () != 0x2a2a2a2a
-            print ("LoadExecutable: Invalid file format - missing separator (1)\n")
+            --print ("LoadExecutable: Invalid file format - missing separator (1)\n")
             frameManager.ReturnAllFrames (addrSpace)
             return -1
           endIf
@@ -3594,7 +3612,7 @@ code Kernel
 
           -- Read and check the separator...
           if  self.ReadInt () != 0x2a2a2a2a
-            print ("LoadExecutable: Invalid file format - missing separator (2)\n")
+            --print ("LoadExecutable: Invalid file format - missing separator (2)\n")
             frameManager.ReturnAllFrames (addrSpace)
             return -1
           endIf
@@ -3675,7 +3693,7 @@ code Kernel
 
 	   if fcb.relativeSectorInBuffer != sec
 	      -- print ("Need to load new sector!\n")
-	      if !fcb.ReadSector(sec)
+	      if !fcb.ReadSector(sec, false)
 	        return null
 	      endIf
 	   endIf
@@ -3747,7 +3765,7 @@ code Kernel
 	   -- Make sure the correct sector is loaded
 	   if fcb.relativeSectorInBuffer != sec
 	      -- print ("Need to load new sector!\n")
-	      if !fcb.ReadSector(sec)
+	      if !fcb.ReadSector(sec, true)
 	        return false
 	      endIf
 	   endIf
