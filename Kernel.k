@@ -991,6 +991,7 @@ code Kernel
         -- This method is passed a ptr to a Process;  It moves it
         -- to the FREE list.
         --
+          FatalError("Never Called") -- not use this method anymore
           processManagerLock.Lock()
           freeList.AddToEnd(p)
           p.status = FREE
@@ -1002,6 +1003,62 @@ code Kernel
 
     endBehavior
 
+     ----------  ProcessManager . TurnIntoZombie  ----------
+
+      method TurnIntoZombie (p: ptr to ProcessControlBlock)
+        --
+        -- This method is passed p, a pointer to a process;  
+        -- It turns it into a zombie ­ dead but not gone
+        --
+        processManagerLock.Lock()
+        for i = 0 to MAX_NUMBER_OF_PROCESSES
+            if processTable[i].pid != -1
+                && processTable[i].parentsPid == p.pid
+                && processTable[i].status == ZOMBIE
+                   processTable[i].status = FREE
+                   processTable[i].pid = -1
+                   freeList.AddToEnd(&processTable[i])
+                   aProcessBecameFree.Signal(&processManagerLock)
+            endIf
+        endFor
+        if p.parentsPid == p.parent.pid -- the parent are not dead
+           if p.parent.status == ACTIVE
+              p.status = ZOMBIE
+              aProcessDied.Broadcast(&processManagerLock)
+           else  -- the parent is Zombie
+                 p.pid = -1
+                 p.status = FREE
+                 freeList.AddToEnd(p)
+                 aProcessBecameFree.Signal(&processManagerLock)
+           endIf
+        endIf
+        processManagerLock.Unlock()
+        endMethod
+
+    endBehavior
+
+     ----------  ProcessManager . WaitForZombie  ----------
+
+      method WaitForZombie (proc: ptr to ProcessControlBlock) returns int
+        --
+        -- his method is passed a pointer to a process;  
+        -- It waits for that process to turn into a zombie
+        --
+        var status: int
+        processManagerLock.Lock()
+        while proc.status != ZOMBIE
+              aProcessDied.Wait(&processManagerLock)
+        endWhile
+        status = proc.exitStatus
+        proc.status = FREE
+        proc.pid = -1
+        freeList.AddToEnd(proc)
+        aProcessBecameFree.Signal(&processManagerLock)
+        processManagerLock.Unlock()
+        return status
+      endMethod
+
+    endBehavior    
 -----------------------------  PrintObjectAddr  ---------------------------------
 
   function PrintObjectAddr (p: ptr to Object)
@@ -1020,7 +1077,19 @@ code Kernel
     -- free the resources held by this process and will terminate the
     -- current thread.
     --
-      FatalError ("ProcessFinish is not implemented")
+    var oldStat: int
+        pProcess: ptr to ProcessControlBlock = currentThread.myProcess
+      pProcess.exitStatus = exitStatus
+      oldStat = SetInterruptsTo(DISABLED)
+      pProcess.myThread = null
+      currentThread.myProcess = null
+      currentThread.isUserThread = flase
+      oldStat = SetInterruptsTo(oldStat)
+      ------ remember to close any open files here
+      pProcess.workingDir.numberOfUsers = pPCB.workingDir.numberOfUsers - 1
+      frameManager.ReturnAllFrames(pProcess.addrSpace)
+      pProcess.TurnIntoZombie()
+      ThreadFinish()
     endFunction
 
 -----------------------------  FrameManager  ---------------------------------
@@ -1926,7 +1995,7 @@ code Kernel
           addarray,newadds: array[MAX_ARRAY_NUMBER] of int 
 	  	    			    = new array of int {MAX_ARRAY_NUMBER of 0}
           paddarray: ptr to array of int = &addarray
-         testarry: array[MAX_ARG_SIZE] of char = new array of char{MAX_ARG_SIZE of '\0'}
+        -- testarry: array[MAX_ARG_SIZE] of char = new array of char{MAX_ARG_SIZE of '\0'}
          
       paddr = &(currentThread.myProcess.addrSpace)
       if paddr.CopyBytesFromVirtual((&argnum) asInteger, args asInteger, 4) < 4
