@@ -211,7 +211,7 @@ code Kernel
    --
    var pth: ptr to Thread
    pth = threadManager.GetANewThread()
-   pth.Init(INIT_NAME)
+   -- pth.Init(INIT_NAME)
    pth.Fork(StartUserProcess, 0)
    endFunction
 ---------------------------StartUserProcess --------------------------------
@@ -225,7 +225,7 @@ code Kernel
        initUserStackTop,initSystemStackTop: int
    --    addSpace: AddrSpace = new AddrSpace      
    pPCB = processManager.GetANewProcess()
-   pPCB.Init()
+   -- pPCB.Init()
    pPCB.myThread = currentThread
    currentThread.myProcess = pPCB
    --open executable file---
@@ -790,9 +790,9 @@ code Kernel
         -- 
           var pThread: ptr to Thread
           threadManagerLock.Lock()
-          if freeList.IsEmpty()
+          while freeList.IsEmpty()
              aThreadBecameFree.Wait(&threadManagerLock)
-          endIf
+          endWhile
           pThread = freeList.Remove()
           pThread.status = JUST_CREATED
           threadManagerLock.Unlock()
@@ -829,6 +829,7 @@ code Kernel
           addrSpace = new AddrSpace
           addrSpace.Init ()
           parent = null
+          parentsPid = 0
 -- Uncomment this code later...
 /*
           fileDescriptor = new array of ptr to OpenFile
@@ -973,9 +974,9 @@ code Kernel
           var
              pPCB: ptr to ProcessControlBlock
           processManagerLock.Lock()
-          if freeList.IsEmpty()
+          while freeList.IsEmpty()
              aProcessBecameFree.Wait(&processManagerLock)
-          endIf
+          endWhile
           pPCB = freeList.Remove()
           pPCB.status = ACTIVE
           pPCB.pid = nextPid
@@ -1038,7 +1039,7 @@ code Kernel
 
       method WaitForZombie (proc: ptr to ProcessControlBlock) returns int
         --
-        -- his method is passed a pointer to a process;  
+        -- this method is passed a pointer to a process;  
         -- It waits for that process to turn into a zombie
         --
         var status: int
@@ -1053,6 +1054,26 @@ code Kernel
         aProcessBecameFree.Signal(&processManagerLock)
         processManagerLock.Unlock()
         return status
+      endMethod
+     ----------  ProcessManager . FindProcess  ----------
+
+      method FindProcess (pid: int) returns ptr to ProcessControlBlock
+        --
+        -- this method find a PCB according to the given Process pid
+        --
+        var i: int
+            pPCB: ptr to ProcessControlBlock
+        processManagerLock.Lock()
+        for i=0 to MAX_NUMBER_OF_PROCESSES-1
+           if processTable[i].pid == pid
+              && processTable[i].status != FREE
+              pPCB = &processTable[i]
+              processManagerLock.Unlock()
+              return pPCB
+          endIf
+        endFor
+        processManagerLock.Unlock()
+        return null
       endMethod
 
     endBehavior    
@@ -1850,20 +1871,23 @@ code Kernel
       var pThread: ptr to Thread
           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
           i, newPageAddr, oldPageAddr, oldUserPC: int
+          newPCB: ptr to ProcessControlBlock
       print ("Handle_Sys_Fork invoked!") nl() nl()
       pThread = threadManager.GetANewThread()
-      pThread.Init("Child")
-      pThread.myProcess = processManager.GetANewProcess()
-      pThread.myProcess.Init()
+      pThread.name = INIT_NAME
+      pThread.status = JUST_CREATED
+      newPCB = processManager.GetANewProcess()
+      pThread.myProcess = newPCB
       pThread.myProcess.myThread = pThread
       pThread.myProcess.parentsPid = currentThread.myProcess.pid
       pThread.myProcess.parent = currentThread.myProcess
 
       -- pThread.myProcess.addrSpace = *paddr
-      SaveUserRegs (&currentThread.userRegs[0])
+      SaveUserRegs (&pThread.userRegs[0])
       pThread.stackTop = &(pThread.systemStack[SYSTEM_STACK_SIZE-1])
       frameManager.GetNewFrames(&pThread.myProcess.addrSpace,
                                            paddr.numberOfPages)
+   -- print("number of pages: ") printInt( pThread.myProcess.addrSpace.numberOfPages) nl()
       for i=0 to pThread.myProcess.addrSpace.numberOfPages - 1
         oldPageAddr = paddr.ExtractFrameAddr(i)
         newPageAddr = pThread.myProcess.addrSpace.ExtractFrameAddr(i)
@@ -1878,7 +1902,7 @@ code Kernel
       oldUserPC = GetOldUserPCFromSystemStack()
       -- Don't forget to copy the fileDescriptor array here
       pThread.Fork(ResumeChildAfterFork, oldUserPC)
-      return pThread.myProcess.pid
+      return newPCB.pid
     endFunction
 
 -----------------------------  ResumeChildAfterFork  ---------------------------------
@@ -1890,12 +1914,15 @@ code Kernel
       var 
           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
           initUserStackTop,initSystemStackTop: int
+--          i: int
       initUserStackTop = paddr.numberOfPages*PAGE_SIZE
       initSystemStackTop = (&currentThread.systemStack[SYSTEM_STACK_SIZE-1]) asInteger
+      currentThread.myProcess.workingDir = fileSystem.rootDirectory.NewReference()
       currentInterruptStatus = DISABLED
       paddr.SetToThisPageTable()
       if(currentThread.myProcess.parentsPid != 0)
-         RestoreUserRegs (&currentThread.myProcess.parent.myThread.userRegs[0])
+-- print("parents id is: ") printInt(currentThread.myProcess.parentsPid) nl()
+         RestoreUserRegs (&currentThread.userRegs[0])
       endIf
       currentThread.isUserThread = true
       BecomeUserThread(initUserStackTop,userPC,initSystemStackTop,0)
@@ -1908,9 +1935,18 @@ code Kernel
       -- This function causes the caller to wait until the process with the given 
       -- pid has terminated, by executing a call to Sys_Exit
       --
-	print ("Handle_Sys_Join invoked!\nprocessID = ")
-        printInt (processID) nl() nl()
-      return 2000
+      var pchild: ptr to ProcessControlBlock
+          exitStat: int
+      print ("Handle_Sys_Join invoked!\nprocessID = ")
+      printInt (processID) nl() nl()
+      pchild = processManager.FindProcess(processID)
+      if pchild != null
+         && pchild.parentsPid == currentThread.myProcess.pid
+         exitStat = processManager.WaitForZombie(pchild)
+         return exitStat
+      else
+         return -1   
+      endIf
     endFunction
 
 -----------------------------  Handle_Sys_Exec  ---------------------------------
@@ -1922,7 +1958,7 @@ code Kernel
       -- That file is assumed to be an executable file
       --
       var  name : array [MAX_STRING_SIZE] of char
-           namesize, initPC,oldStat,ret: int
+           namesize, initPC,oldStat,newUStackTop: int
            exeFile: ptr to OpenFile
            addrSpace: AddrSpace = new AddrSpace
            paddr: ptr to AddrSpace
@@ -1955,12 +1991,12 @@ code Kernel
          frameManager.ReturnAllFrames(&addrSpace)
          return -1
       endIf
-      ret = 0
+      newUStackTop = addrSpace.numberOfPages*PAGE_SIZE
       --copy args from old addr sapce to new addr space
       if args != null
-         ptrArgs = addrSpace.numberOfPages*PAGE_SIZE
-        ret = CopyToNewSpace(ptrArgs,args,&addrSpace)
-        if ret == -1
+         ptrArgs = newUStackTop
+        newUStackTop = CopyToNewSpace(ptrArgs,args,&addrSpace)
+        if newUStackTop == -1
            frameManager.ReturnAllFrames(&addrSpace)
            return -1
         endIf
@@ -1971,11 +2007,11 @@ code Kernel
       paddr = &currentThread.myProcess.addrSpace
      
       fileManager.Close(exeFile)  --close file
-      initUserStackTop = ret
-      initSysStackTop = (&currentThread.systemStack[SYSTEM_STACK_SIZE -2]) asInteger
+      initUserStackTop = newUStackTop
+      initSysStackTop = (&currentThread.systemStack[SYSTEM_STACK_SIZE -1]) asInteger
       oldStat = SetInterruptsTo(DISABLED)
       paddr.SetToThisPageTable()
-      BecomeUserThread(initUserStackTop,initPC,initSysStackTop,ret)
+      BecomeUserThread(initUserStackTop,initPC,initSysStackTop,newUStackTop)
       return 3000
     endFunction
 ---------------------------CopyToNewSpace------------------------

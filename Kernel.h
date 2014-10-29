@@ -1,5 +1,3 @@
--- -*-Fundamental-*-
--- The above line for emacs if you use it
 
 header Kernel
 
@@ -253,7 +251,7 @@ header Kernel
       PrintShort ()
       GetANewProcess () returns ptr to ProcessControlBlock
       FreeProcess (p: ptr to ProcessControlBlock)
-      --FindProcess (pid: int) returns ptr to ProcessControlBlock
+      FindProcess (pid: int) returns ptr to ProcessControlBlock
       TurnIntoZombie (p: ptr to ProcessControlBlock)
       WaitForZombie (proc: ptr to ProcessControlBlock) returns int
   endClass
