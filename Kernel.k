@@ -1009,7 +1009,7 @@ code Kernel
         --
         var i: int
         processManagerLock.Lock()
-        for i = 0 to MAX_NUMBER_OF_PROCESSES
+        for i = 0 to MAX_NUMBER_OF_PROCESSES-1
             if processTable[i].pid != -1
                 && processTable[i].parentsPid == p.pid
                 && processTable[i].status == ZOMBIE
@@ -1019,7 +1019,8 @@ code Kernel
                    aProcessBecameFree.Signal(&processManagerLock)
             endIf
         endFor
-        if p.parentsPid == p.parent.pid -- the parent are not dead
+        if p.parentsPid != 0
+           && p.parentsPid == p.parent.pid -- the parent are not dead
            if p.parent.status == ACTIVE
               p.status = ZOMBIE
               aProcessDied.Broadcast(&processManagerLock)
@@ -1819,6 +1820,7 @@ code Kernel
       --
 	print ("Handle_Sys_Exit invoked!\nreturnStatus = ")
         printInt (returnStatus) nl() nl()
+        ProcessFinish(currentThread.myProcess.exitStatus)
     endFunction
 
 -----------------------------  Handle_Sys_Shutdown  ---------------------------------
