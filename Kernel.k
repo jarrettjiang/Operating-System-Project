@@ -1870,7 +1870,7 @@ code Kernel
       --
       var pThread: ptr to Thread
           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
-          i, newPageAddr, oldPageAddr, oldUserPC: int
+          i, newPageAddr, oldPageAddr, oldUserPC, oldStat: int
           newPCB: ptr to ProcessControlBlock
       print ("Handle_Sys_Fork invoked!") nl() nl()
       pThread = threadManager.GetANewThread()
@@ -1884,6 +1884,7 @@ code Kernel
 
       -- pThread.myProcess.addrSpace = *paddr
       SaveUserRegs (&pThread.userRegs[0])
+     oldStat = SetInterruptsTo( ENABLED )
       pThread.stackTop = &(pThread.systemStack[SYSTEM_STACK_SIZE-1])
       frameManager.GetNewFrames(&pThread.myProcess.addrSpace,
                                            paddr.numberOfPages)
@@ -1898,7 +1899,7 @@ code Kernel
              pThread.myProcess.addrSpace.ClearWritable(i)
         endIf
       endFor
-      currentInterruptStatus = ENABLED
+
       oldUserPC = GetOldUserPCFromSystemStack()
       -- Don't forget to copy the fileDescriptor array here
       pThread.Fork(ResumeChildAfterFork, oldUserPC)
@@ -1913,17 +1914,14 @@ code Kernel
       -- 
       var 
           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
-          initUserStackTop,initSystemStackTop: int
+          initUserStackTop,initSystemStackTop, oldStat: int
 --          i: int
-      initUserStackTop = paddr.numberOfPages*PAGE_SIZE
+      initUserStackTop = currentThread.userRegs[14]
       initSystemStackTop = (&currentThread.systemStack[SYSTEM_STACK_SIZE-1]) asInteger
       currentThread.myProcess.workingDir = fileSystem.rootDirectory.NewReference()
-      currentInterruptStatus = DISABLED
+      oldStat = SetInterruptsTo(DISABLED)
       paddr.SetToThisPageTable()
-      if(currentThread.myProcess.parentsPid != 0)
--- print("parents id is: ") printInt(currentThread.myProcess.parentsPid) nl()
-         RestoreUserRegs (&currentThread.userRegs[0])
-      endIf
+      RestoreUserRegs (&currentThread.userRegs[0])
       currentThread.isUserThread = true
       BecomeUserThread(initUserStackTop,userPC,initSystemStackTop,0)
     endFunction
