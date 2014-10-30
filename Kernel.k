@@ -1013,24 +1013,26 @@ code Kernel
         for i = 0 to MAX_NUMBER_OF_PROCESSES-1
             if processTable[i].pid != -1
                 && processTable[i].parentsPid == p.pid
-                && processTable[i].status == ZOMBIE
+                processTable[i].parentsPid = 0
+                if processTable[i].status == ZOMBIE
                    processTable[i].status = FREE
-                   processTable[i].pid = -1
+                    processTable[i].pid = -1                  
                    freeList.AddToEnd(&processTable[i])
                    aProcessBecameFree.Signal(&processManagerLock)
+                endIf
             endIf
         endFor
         if p.parentsPid != 0
            && p.parentsPid == p.parent.pid -- the parent are not dead
-           if p.parent.status == ACTIVE
+           && p.parent.status == ACTIVE
               p.status = ZOMBIE
               aProcessDied.Broadcast(&processManagerLock)
-           else  -- the parent is Zombie
+        else  -- the parent is Zombie or dead
                  p.pid = -1
                  p.status = FREE
+                 p.parentsPid = 0
                  freeList.AddToEnd(p)
                  aProcessBecameFree.Signal(&processManagerLock)
-           endIf
         endIf
         processManagerLock.Unlock()
         endMethod
@@ -1818,6 +1820,13 @@ code Kernel
           return Handle_Sys_Write (arg1, arg2 asPtrTo char, arg3)
         case SYSCALL_SEEK:
           return Handle_Sys_Seek (arg1, arg2)
+        case SYSCALL_GETPID:
+          return Handle_Sys_GetPid ()
+        case SYSCALL_GETPPID:
+          return Handle_Sys_GetPPid ()
+        case SYSCALL_STAT:
+          return Handle_Sys_Stat (arg1 asPtrTo array of char,
+                                    arg2 asPtrTo statInfo)
         case SYSCALL_CLOSE:
           Handle_Sys_Close (arg1)
           return 0
@@ -1839,8 +1848,8 @@ code Kernel
       --
       -- This function causes the current process and its thread to terminate
       --
-	print ("Handle_Sys_Exit invoked!\nreturnStatus = ")
-        printInt (returnStatus) nl() nl()
+	 -- print ("Handle_Sys_Exit invoked!\nreturnStatus = ")
+         -- printInt (returnStatus) nl() nl()
         ProcessFinish(currentThread.myProcess.exitStatus)
     endFunction
 
@@ -1859,7 +1868,8 @@ code Kernel
       --
       -- This function yields the CPU to another process on the ready list
       --
-      print ("Handle_Sys_Yield invoked!") nl() nl()
+     -- print ("Handle_Sys_Yield invoked!") nl()
+      currentThread.Yield()
     endFunction
 
 -----------------------------  Handle_Sys_Fork  ---------------------------------
@@ -1872,7 +1882,7 @@ code Kernel
           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
           i, newPageAddr, oldPageAddr, oldUserPC, oldStat: int
           newPCB: ptr to ProcessControlBlock
-      print ("Handle_Sys_Fork invoked!") nl() nl()
+      --print ("Handle_Sys_Fork invoked!") nl() nl()
       pThread = threadManager.GetANewThread()
       pThread.name = INIT_NAME
       pThread.status = JUST_CREATED
@@ -1946,7 +1956,73 @@ code Kernel
          return -1   
       endIf
     endFunction
+-----------------------------  Handle_Sys_GetPid  ---------------------------------
 
+  function Handle_Sys_GetPid () returns int
+      --
+      -- This function returns process id
+      --      
+      print ("Handle_Sys_GetPid invoked! ") nl()
+      return currentThread.myProcess.pid
+    endFunction
+-----------------------------  Handle_Sys_GetPPid  ---------------------------------
+
+  function Handle_Sys_GetPPid () returns int
+      --
+      -- This function returns the parents' pid
+      --
+      print ("Handle_Sys_GetPPid invoked!") nl()
+      return currentThread.myProcess.parentsPid   -- 0 means parents no exist anymroe
+    endFunction 
+-----------------------------  Handle_Sys_Stat  ---------------------------------
+
+  function Handle_Sys_Stat (filename: ptr to array of char, 
+                                         statPtr: ptr to statInfo) returns int 
+      --
+      -- This function causes the caller to wait until the process with the given 
+      -- pid has terminated, by executing a call to Sys_Exit
+      --
+      var name: array[MAX_STRING_SIZE] of char = new array of char {MAX_STRING_SIZE of '\0'}
+          inumber, viraddr, namesize: int
+          fcb: ptr to FileControlBlock
+          paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+      print ("Handle_Sys_Stat invoked!") nl()
+      namesize = paddr.GetStringFromVirtual(&name,filename asInteger,
+								MAX_STRING_SIZE)
+      if namesize < 0
+         return -1
+      endIf
+      inumber = fileSystem.NameToInodeNum(&name, currentThread.myProcess.workingDir)
+      if inumber == -1
+         return -1
+      endIf
+      fcb = fileManager.LookupFCB(inumber)
+      if fcb == null
+          return -1
+      endIf
+      viraddr = statPtr asInteger
+      if paddr.CopyBytesToVirtual(viraddr, (&inumber) asInteger, 4) == -1
+         return -1
+      endIf
+      viraddr = viraddr + 4
+      if paddr.CopyBytesToVirtual(viraddr, (&fcb.inode.nlinks) asInteger, 4) == -1
+         return -1
+      endIf
+      viraddr = viraddr + 4
+      if paddr.CopyBytesToVirtual(viraddr, (&fcb.inode.mode) asInteger, 4) == -1
+         return -1
+      endIf
+      viraddr = viraddr + 4
+      if paddr.CopyBytesToVirtual(viraddr, (&fcb.inode.fsize) asInteger, 4) == -1
+         return -1
+      endIf
+      viraddr = viraddr + 4
+      if paddr.CopyBytesToVirtual(viraddr, (&fcb.inode.balloc) asInteger, 4) == -1
+         return -1
+      endIf
+      return 0
+    endFunction     
+   
 -----------------------------  Handle_Sys_Exec  ---------------------------------
 
  function Handle_Sys_Exec (filename: ptr to array of char,

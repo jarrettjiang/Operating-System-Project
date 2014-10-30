@@ -98,6 +98,8 @@ header Kernel
     Handle_Sys_Seek (fileDesc: int, newCurrentPos: int) returns int
     Handle_Sys_Close (fileDesc: int)
     Handle_Sys_Shutdown ()
+    Handle_Sys_GetPid () returns int
+    Handle_Sys_GetPPid () returns int
 
     InitializeScheduler ()
     Run (nextThread: ptr to Thread)
