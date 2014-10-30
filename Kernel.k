@@ -211,7 +211,7 @@ code Kernel
    --
    var pth: ptr to Thread
    pth = threadManager.GetANewThread()
-   -- pth.Init(INIT_NAME)
+   pth.name = INIT_NAME
    pth.Fork(StartUserProcess, 0)
    endFunction
 ---------------------------StartUserProcess --------------------------------
@@ -1052,6 +1052,7 @@ code Kernel
         status = proc.exitStatus
         proc.status = FREE
         proc.pid = -1
+        proc.parentsPid = 0
         freeList.AddToEnd(proc)
         aProcessBecameFree.Signal(&processManagerLock)
         processManagerLock.Unlock()
@@ -1759,7 +1760,12 @@ code Kernel
       print ("\n**********  ")
       print (errorMessage)
       print ("  **********\n\n")
-
+      -- add to print process name and pid
+      print("******  The process is: ") print(currentThread.name)
+      if currentThread.myProcess
+         print(",  PID is: ") printInt(currentThread.myProcess.pid) 
+         print("  *****")nl() nl()
+      endIf
       -- Print some information about the offending process...
       if currentThread.myProcess
         currentThread.myProcess.Print ()
@@ -1850,7 +1856,7 @@ code Kernel
       --
 	 -- print ("Handle_Sys_Exit invoked!\nreturnStatus = ")
          -- printInt (returnStatus) nl() nl()
-        ProcessFinish(currentThread.myProcess.exitStatus)
+        ProcessFinish(returnStatus)
     endFunction
 
 -----------------------------  Handle_Sys_Shutdown  ---------------------------------
@@ -1945,8 +1951,8 @@ code Kernel
       --
       var pchild: ptr to ProcessControlBlock
           exitStat: int
-      print ("Handle_Sys_Join invoked!\nprocessID = ")
-      printInt (processID) nl() nl()
+      -- print ("Handle_Sys_Join invoked!\nprocessID = ")
+      -- printInt (processID) nl() nl()
       pchild = processManager.FindProcess(processID)
       if pchild != null
          && pchild.parentsPid == currentThread.myProcess.pid
@@ -1962,7 +1968,7 @@ code Kernel
       --
       -- This function returns process id
       --      
-      print ("Handle_Sys_GetPid invoked! ") nl()
+      -- print ("Handle_Sys_GetPid invoked! ") nl()
       return currentThread.myProcess.pid
     endFunction
 -----------------------------  Handle_Sys_GetPPid  ---------------------------------
@@ -1971,7 +1977,7 @@ code Kernel
       --
       -- This function returns the parents' pid
       --
-      print ("Handle_Sys_GetPPid invoked!") nl()
+      -- print ("Handle_Sys_GetPPid invoked!") nl()
       return currentThread.myProcess.parentsPid   -- 0 means parents no exist anymroe
     endFunction 
 -----------------------------  Handle_Sys_Stat  ---------------------------------
@@ -1986,7 +1992,7 @@ code Kernel
           inumber, viraddr, namesize: int
           fcb: ptr to FileControlBlock
           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
-      print ("Handle_Sys_Stat invoked!") nl()
+      -- print ("Handle_Sys_Stat invoked!") nl()
       namesize = paddr.GetStringFromVirtual(&name,filename asInteger,
 								MAX_STRING_SIZE)
       if namesize < 0
@@ -1996,7 +2002,7 @@ code Kernel
       if inumber == -1
          return -1
       endIf
-      fcb = fileManager.LookupFCB(inumber)
+      fcb = fileManager.GetFCB(inumber)
       if fcb == null
           return -1
       endIf
@@ -2042,16 +2048,16 @@ code Kernel
      --      temArgs: array [100] of array [MAX_STRING_SIZE] of char
        paddr = &currentThread.myProcess.addrSpace 
        name = new array [MAX_STRING_SIZE] of char {MAX_STRING_SIZE of '\0'}
-      print ("Handle_Sys_Exec invoked!\n")
-      print ("virt addr of filename = 0x") printHex(filename asInteger) nl()     
+      -- print ("Handle_Sys_Exec invoked!\n")
+      -- print ("virt addr of filename = 0x") printHex(filename asInteger) nl()     
       namesize = paddr.GetStringFromVirtual(&name,filename asInteger,
 								MAX_STRING_SIZE)
       if namesize < 0
            --print("GetStringFromVirtual error when handle sys exec\n")
            return -1
       endIf
-      print("filename = ")
-      print(&name) nl() nl()
+      -- print("filename = ")
+      -- print(&name) nl() nl()
       exeFile = fileManager.Open(&name,fileSystem.rootDirectory,O_READ,TYPE_FILE)
       if exeFile == null
         -- print("Open file error in handle sys exec\n")
@@ -2061,7 +2067,7 @@ code Kernel
       ptrArgs = 0
       initPC = exeFile.LoadExecutable(&addrSpace)
       if initPC == -1
-        -- print("loac executable error in sys exe\nc")
+        -- print("load executable error in sys exe\nc")
          frameManager.ReturnAllFrames(&addrSpace)
          return -1
       endIf
@@ -2078,9 +2084,9 @@ code Kernel
       --free frame for old addrSpace in process
       frameManager.ReturnAllFrames(paddr)
       currentThread.myProcess.addrSpace = addrSpace
-      paddr = &currentThread.myProcess.addrSpace
-     
+      paddr = &currentThread.myProcess.addrSpace     
       fileManager.Close(exeFile)  --close file
+      currentThread.name = &name
       initUserStackTop = newUStackTop
       initSysStackTop = (&currentThread.systemStack[SYSTEM_STACK_SIZE -1]) asInteger
       oldStat = SetInterruptsTo(DISABLED)
