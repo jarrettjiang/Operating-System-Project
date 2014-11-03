@@ -5,7 +5,7 @@ header Kernel
 
   const
 
-    INIT_NAME = "TestProgram3"
+    INIT_NAME = "TestProgram4"
 
     SYSTEM_STACK_SIZE = 1000       -- in words
     STACK_SENTINEL = 0x24242424    -- in ASCII, this is "$$$$"
@@ -26,10 +26,10 @@ header Kernel
 
     MAX_NUMBER_OF_PROCESSES = 10
     MAX_STRING_SIZE = 20
-    MAX_PAGES_PER_VIRT_SPACE = 20
+    MAX_PAGES_PER_VIRT_SPACE = 25
     MAX_FILES_PER_PROCESS = 10
-    MAX_NUMBER_OF_FILE_CONTROL_BLOCKS = 10
-    MAX_NUMBER_OF_OPEN_FILES = 10
+    MAX_NUMBER_OF_FILE_CONTROL_BLOCKS = 15
+    MAX_NUMBER_OF_OPEN_FILES = 15
     USER_STACK_SIZE_IN_PAGES = 1
     NUMBER_OF_ENVIRONMENT_PAGES = 0
 
@@ -202,6 +202,7 @@ header Kernel
       freeList: List [Thread]
       threadManagerLock: Mutex
       aThreadBecameFree: Condition
+      numOfWaits: int
     methods
       Init ()
       Print ()
@@ -227,7 +228,7 @@ header Kernel
       exitStatus: int               -- The value passed to Sys_Exit
       addrSpace: AddrSpace          -- The logical address space
       workingDir: ptr to OpenFile   -- The current working directory
-      -- fileDescriptor: array [MAX_FILES_PER_PROCESS] of ptr to OpenFile
+      fileDescriptor: array [MAX_FILES_PER_PROCESS] of ptr to OpenFile
     methods
       Init ()
       Print ()
@@ -247,6 +248,7 @@ header Kernel
       freeList: List [ProcessControlBlock]
       aProcessDied: Condition                 -- Signalled for new ZOMBIEs
       nextPid: int
+      numOfWaits: int
     methods
       Init ()
       Print ()

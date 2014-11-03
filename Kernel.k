@@ -746,6 +746,7 @@ code Kernel
           print ("Initializing Thread Manager...\n")
           threadTable = new array of Thread {MAX_NUMBER_OF_PROCESSES of new Thread}
           freeList = new List[Thread]
+          numOfWaits = 0
           for i=0 to MAX_NUMBER_OF_PROCESSES - 1
               threadTable[i].Init("thread")
               threadTable[i].status = UNUSED
@@ -790,9 +791,12 @@ code Kernel
         -- 
           var pThread: ptr to Thread
           threadManagerLock.Lock()
-          while freeList.IsEmpty()
-             aThreadBecameFree.Wait(&threadManagerLock)
-          endWhile
+          if numOfWaits > 0
+             || freeList.IsEmpty()
+              numOfWaits = numOfWaits + 1
+              aThreadBecameFree.Wait(&threadManagerLock) 
+              numOfWaits = numOfWaits - 1
+          endIf
           pThread = freeList.Remove()
           pThread.status = JUST_CREATED
           threadManagerLock.Unlock()
@@ -830,11 +834,10 @@ code Kernel
           addrSpace.Init ()
           parent = null
           parentsPid = 0
--- Uncomment this code later...
-/*
+
           fileDescriptor = new array of ptr to OpenFile
                       { MAX_FILES_PER_PROCESS of null }
-*/
+
         endMethod
 
       ----------  ProcessControlBlock . Print  ----------
@@ -848,8 +851,7 @@ code Kernel
           addrSpace.Print ()
           print ("    myThread = ")
           ThreadPrintShort (myThread)
--- Uncomment this code later...
-/*
+
           print ("    File Descriptors:\n")
           for i = 0 to MAX_FILES_PER_PROCESS-1
             if fileDescriptor[i]
@@ -859,7 +861,7 @@ code Kernel
             endIf
           endFor
           print (" Working Dir: ") workingDir.Print()
-*/
+
         endMethod
 
       ----------  ProcessControlBlock . PrintShort  ----------
@@ -916,6 +918,7 @@ code Kernel
         aProcessDied = new Condition
         aProcessDied.Init()
         nextPid = 1
+        numOfWaits = 0
 
         endMethod
 
@@ -974,9 +977,12 @@ code Kernel
           var
              pPCB: ptr to ProcessControlBlock
           processManagerLock.Lock()
-          while freeList.IsEmpty()
-             aProcessBecameFree.Wait(&processManagerLock)
-          endWhile
+          if numOfWaits > 0
+             || freeList.IsEmpty()
+                numOfWaits = numOfWaits + 1
+                aProcessBecameFree.Wait(&processManagerLock)
+                numOfWaits = numOfWaits - 1
+          endIf
           pPCB = freeList.Remove()
           pPCB.status = ACTIVE
           pPCB.pid = nextPid
@@ -2208,6 +2214,9 @@ code Kernel
       len = paddr.GetStringFromVirtual(&name,filename asInteger,MAX_STRING_SIZE)
       print("filename = ")
       print(&name)   nl()
+      if len < 0
+         return -1
+      endIf
       --print ("flags = ")
       --printInt(flags)  nl()
       --print ("mode = ")
