@@ -100,6 +100,7 @@ header Kernel
     Handle_Sys_Shutdown ()
     Handle_Sys_GetPid () returns int
     Handle_Sys_GetPPid () returns int
+    Handle_Sys_OpenDir (filename: ptr to array of char) returns int
 
     InitializeScheduler ()
     Run (nextThread: ptr to Thread)
