@@ -662,6 +662,7 @@ code Kernel
               print ("    status = BLOCKED\n")
               break
             case UNUSED:
+
               print ("    status = UNUSED\n")
               break
             default:
@@ -1839,6 +1840,10 @@ code Kernel
         case SYSCALL_STAT:
           return Handle_Sys_Stat (arg1 asPtrTo array of char,
                                     arg2 asPtrTo statInfo)
+        case SYSCALL_CHMODE:
+          return Handle_Sys_ChMode (arg1 asPtrTo array of char,arg2)
+        case SYSCALL_READDIR:
+          return Handle_Sys_Readdir (arg1,arg2 asPtrTo dirEntry)
         case SYSCALL_CLOSE:
           Handle_Sys_Close (arg1)
           return 0
@@ -2281,6 +2286,10 @@ code Kernel
       currentThread.myProcess.fileDescriptor[i] = pOpen
       return i
   endFunction
+
+  function  Handle_Sys_ChMode (filename: String, mode: int) returns int
+  function  Handle_Sys_Readdir (dfd: int, entPtr: ptr to dirEntry) returns int
+
 -----------------------------  Handle_Sys_Read  ---------------------------------
 
   function Handle_Sys_Read (fileDesc: int, buffer: ptr to char, sizeInBytes: int) returns int

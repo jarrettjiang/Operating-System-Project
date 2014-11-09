@@ -101,6 +101,8 @@ header Kernel
     Handle_Sys_GetPid () returns int
     Handle_Sys_GetPPid () returns int
     Handle_Sys_OpenDir (filename: ptr to array of char) returns int
+    Handle_Sys_ChMode (filename: String, mode: int) returns int
+    Handle_Sys_Readdir (dfd: int, entPtr: ptr to dirEntry) returns int
 
     InitializeScheduler ()
     Run (nextThread: ptr to Thread)
