@@ -2305,6 +2305,7 @@ code Kernel
       if fileDesc > MAX_FILES_PER_PROCESS
          || pProcess.fileDescriptor[fileDesc] == null
          || sizeInBytes < 0
+         || pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
          return -1
       endIf
       -- check buffer is a valid pointer, and is writable      
@@ -2354,15 +2355,60 @@ code Kernel
      --This function is passed the fileDescriptor of a file 
      -- , a pointer to an area of memory, and a count of the number of bytes to transfe
      --
+     var   virtAddr, virtPage, offset, copiedSoFar, nextPosInFile: int
+           thisChunkSize, sizeOfFile, retVal: int
+           pvirSpace: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+           pProcess: ptr to ProcessControlBlock = currentThread.myProcess
+         
       print ("Handle_Sys_Write invoked!\n")
       print ("fileDesc = ")
-      printInt(fileDesc)  nl()
+      printInt(fileDesc) nl()
       print ("virt addr of buffer = 0x") printHex (buffer asInteger) nl()
       print ("sizeInBytes = ")
-      printInt(sizeInBytes) nl() nl()
+      printInt(sizeInBytes)  nl() nl()
       --if error occours the function returns -1
       -- fail for directory
-      return 7000
+      --check if fileDesc is valid
+      if fileDesc > MAX_FILES_PER_PROCESS
+         || pProcess.fileDescriptor[fileDesc] == null
+         || sizeInBytes < 0
+         || pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
+         return -1
+      endIf
+      -- check buffer is a valid pointer, and is writable      
+       virtAddr = buffer asInteger
+       virtPage = virtAddr/PAGE_SIZE
+       offset = virtAddr % PAGE_SIZE
+       copiedSoFar = 0
+       nextPosInFile = pProcess.fileDescriptor[fileDesc].currentPos
+       sizeOfFile = pProcess.fileDescriptor[fileDesc].fcb.inode.fsize
+       --Each iteration will compute the size of the next chunk and process it..
+       while true
+          -- compute the size of this chunk
+          thisChunkSize = PAGE_SIZE - offset
+          if copiedSoFar + thisChunkSize > sizeInBytes
+             thisChunkSize = sizeInBytes - copiedSoFar
+          endIf
+          -- see if we are done
+          if thisChunkSize <= 0
+             break
+          endIf
+          -- check for errors
+          if virtPage < 0 
+             || virtPage > MAX_PAGES_PER_VIRT_SPACE
+             || !pvirSpace.IsValid(virtPage)
+             return -1
+          endIf      
+          nextPosInFile = nextPosInFile + thisChunkSize
+          copiedSoFar = copiedSoFar + thisChunkSize
+          virtPage = virtPage + 1
+          offset = 0
+          if copiedSoFar == sizeInBytes
+             break
+          endIf
+      endWhile
+      retVal = fileSystem.WriteFile(pProcess.fileDescriptor[fileDesc],buffer, sizeInBytes) 
+     return retVal
     endFunction
 
 -----------------------------  Handle_Sys_Seek  ---------------------------------
@@ -2372,6 +2418,8 @@ code Kernel
       -- This function is passed the fileDescriptor of a file  
       -- and a new current position
       --
+      var pOpen: ptr to OpenFile
+          pProcess: ptr to ProcessControlBlock = currentThread.myProcess
       print ("Handle_Sys_Seek invoked!\n")
       print("fileDesc = ")
       printInt(fileDesc)  nl()
@@ -2379,7 +2427,26 @@ code Kernel
       printInt(newCurrentPos) nl() nl()
       --if error occours the function returns -1
       -- for directory pos should be 0, otherwise fail
-      return 8000
+      fileManager.fileManagerLock.Lock()
+      if fileDesc > MAX_FILES_PER_PROCESS
+         fileManager.fileManagerLock.Unlock()
+         return -1
+      endIf
+      pOpen = pProcess.fileDescriptor[fileDesc]
+      if pOpen == null
+         || (pOpen.kind == DIRECTORY && newCurrentPos != 0)
+         || newCurrentPos < -1
+         || newCurrentPos > pOpen.fcb.inode.fsize 
+         fileManager.fileManagerLock.Unlock()
+         return -1
+      endIf
+      if newCurrentPos == -1
+         pOpen.currentPos = pOpen.fcb.inode.fsize
+      else --  0 <= newCurrrentPos <= fsize
+         pOpen.currentPos = newCurrentPos
+      endIf
+      fileManager.fileManagerLock.Unlock()
+      return pOpen.currentPos
     endFunction
 
 -----------------------------  Handle_Sys_Close  ---------------------------------
@@ -2389,9 +2456,16 @@ code Kernel
       -- This function is passed the fileDescriptor of a file, 
       -- which is assumed to be open. It closes the file.
       --
+      var pProcess: ptr to ProcessControlBlock = currentThread.myProcess
       print ("Handle_Sys_Close invoked!\n")
       print("fileDesc = ")
       printInt(fileDesc) nl() nl()
+      if fileDesc > MAX_FILES_PER_PROCESS
+         ||pProcess.fileDescriptor[fileDesc] == null
+         return
+      endIf
+      fileManager.Close(pProcess.fileDescriptor[fileDesc])
+      pProcess.fileDescriptor[fileDesc] = null
     endFunction
 
 -----------------------------  DiskDriver  ---------------------------------
@@ -2946,10 +3020,11 @@ code Kernel
               -- No need to read the sector first
               open.fcb.Flush()
             elseIf fcb.relativeSectorInBuffer != sector
+                   ||bytePos >= open.fcb.inode.fsize
 	      -- Read the sector before we do a partial write
 	      if !fcb.ReadSector (sector, true)
 	         fileManagerLock.Unlock()
-	         return false
+	         return false 
 	      endIf
             endIf
             posInBuffer = fcb.bufferPtr + offset
@@ -3319,8 +3394,51 @@ code Kernel
 
     method  WriteFile (file: ptr to OpenFile, userBuffer: ptr to char,
                        sizeInBytes: int)  returns int
-        FatalError ("ToyFs . WriteFile Not Implemented.")
-        return -1
+      --  FatalError ("ToyFs . WriteFile Not Implemented.")
+      -- write file, call fileManager.SynchWrite()
+      var virtAddr, virtPage, offset, copiedSoFar, nextPosInFile: int
+           thisChunkSize, sizeOfFile, sourceAddr: int
+           pvirSpace: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+       
+       virtAddr = userBuffer asInteger
+       virtPage = virtAddr/PAGE_SIZE
+       offset = virtAddr % PAGE_SIZE
+       copiedSoFar = 0
+       nextPosInFile = file.currentPos
+       sizeOfFile = file.fcb.inode.fsize
+       --Each iteration will compute the size of the next chunk and process it..
+       while true
+          -- compute the size of this chunk
+          thisChunkSize = PAGE_SIZE - offset
+          if copiedSoFar + thisChunkSize > sizeInBytes
+             thisChunkSize = sizeInBytes - copiedSoFar
+          endIf
+          -- see if we are done
+          if thisChunkSize <= 0
+             break
+          endIf
+          -- check for errors
+          if virtPage < 0 
+             || virtPage > MAX_PAGES_PER_VIRT_SPACE
+             || !pvirSpace.IsValid(virtPage)
+             return -1
+          endIf
+          -- pvirSpace.SetDirty(virtPage)
+          pvirSpace.SetReferenced(virtPage)
+          sourceAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset          
+          if !fileManager.SynchWrite(file,sourceAddr,nextPosInFile,thisChunkSize)
+             break
+          endIf
+          nextPosInFile = nextPosInFile + thisChunkSize
+          copiedSoFar = copiedSoFar + thisChunkSize
+          virtPage = virtPage + 1
+          offset = 0
+          if copiedSoFar == sizeInBytes
+             break
+          endIf
+      endWhile
+        file.fcb.inode.fsize = sizeOfFile + copiedSoFar
+        return copiedSoFar
       endMethod
 
       --------------- ToyFs . CreateFile  ----------------
@@ -3555,8 +3673,37 @@ code Kernel
       ----------- InodeData . AllocateNewSector () -------------
 
       method AllocateNewSector (logicalSector: int) returns bool
-          -- Implementation not supplied ....
-          return false
+          --
+          -- allocate a new sector to extend file
+          --
+          var newSector: int
+              dbPtr: ptr to int
+          newSector = fileSystem.AllocDataBlock()
+          if logicalSector < 10
+             direct[logicalSector] = newSector
+          else
+            if logicalSector < 2058
+               if indir1 == 0
+                  indir1 = fileSystem.AllocDataBlock()
+                 if indSec <= 0
+                    self.GetIndirect()
+                 endIf
+                 MemoryZero(indSec, PAGE_SIZE)
+               endIf
+               if indSec <= 0
+                 self.GetIndirect()
+               endIf
+               dbPtr = (indSec + (logicalSector-10)*4) asPtrTo int
+	       *dbPtr = newSector                  
+            else
+	      -- Not implemented
+	      FatalError ("Double Indirect not implemented.")
+            endIf
+            self.SaveIndirect()
+            dirty = true
+            self.WriteInode()
+          endIf
+          return true
       endMethod
 
       ----------- InodeData . GetIndirect () -------------
