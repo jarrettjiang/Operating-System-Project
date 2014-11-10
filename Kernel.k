@@ -1928,7 +1928,10 @@ code Kernel
       endFor
 
       oldUserPC = GetOldUserPCFromSystemStack()
-      -- Don't forget to copy the fileDescriptor array here
+      -- copy the fileDescriptor array here
+      for i=0 to MAX_FILES_PER_PROCESS -1
+          newPCB.fileDescriptor[i] = currentThread.myProcess.fileDescriptor[i]
+      endFor
       pThread.Fork(ResumeChildAfterFork, oldUserPC)
       return newPCB.pid
     endFunction
@@ -2207,7 +2210,7 @@ code Kernel
 
   function Handle_Sys_Open (filename: ptr to array of char, flags, mode: int) returns int
      --
-     -- his function opens a file.  The flags, found in Syscall.h, represent how the file   
+     -- This function opens a file.  The flags, found in Syscall.h, represent how the file   
      -- must be opened and the file's permissions must match the requested open flag
      --
       var  name: array [MAX_STRING_SIZE] of char
@@ -2215,15 +2218,15 @@ code Kernel
 	   paddr: ptr to AddrSpace
            pOpen: ptr to OpenFile
       paddr = &currentThread.myProcess.addrSpace 
-      print ("Handle_Sys_Open invoked!\n")
-      print ("virt addr of filename = 0x") printHex(filename asInteger) nl()     
+      --print ("Handle_Sys_Open invoked!\n")
+      --print ("virt addr of filename = 0x") printHex(filename asInteger) nl()     
       len = paddr.GetStringFromVirtual(&name,filename asInteger,MAX_STRING_SIZE)
-      print("filename = ")
-      print(&name)   nl()
+     -- print("filename = ")
+     -- print(&name)   nl()
       if len < 0
          return -1
       endIf
-      for i=0 to MAX_FILES_PER_PROCESS
+      for i=0 to MAX_FILES_PER_PROCESS - 1
           if currentThread.myProcess.fileDescriptor[i] == null
               break
           endIf
@@ -2239,6 +2242,7 @@ code Kernel
          fileManager.Close(pOpen)
          return -1
       endIf
+     -- print("pOpenNumber ") printInt(pOpen.numberOfUsers) nl()
       currentThread.myProcess.fileDescriptor[i] = pOpen
       --print ("flags = ")
       --printInt(flags)  nl()
@@ -2267,7 +2271,7 @@ code Kernel
          return -1
       endIf
 
-      for i=0 to MAX_FILES_PER_PROCESS
+      for i=0 to MAX_FILES_PER_PROCESS - 1
           if currentThread.myProcess.fileDescriptor[i] == null
 		break
           endIf
@@ -2287,9 +2291,62 @@ code Kernel
       return i
   endFunction
 
+-----------------------------  Handle_Sys_ChMode  ---------------------------------
   function  Handle_Sys_ChMode (filename: String, mode: int) returns int
+--
+     -- change the read/write mode of file
+     --
+     var name: array[MAX_STRING_SIZE] of char = new array of char {MAX_STRING_SIZE of '\0'}
+         inumber, namesize: int
+         fcb: ptr to FileControlBlock
+         paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+      -- print ("Handle_Sys_ChMode invoked!") nl()
+      namesize = paddr.GetStringFromVirtual(&name,filename asInteger,
+								MAX_STRING_SIZE)
+      if namesize < 0
+         return -1
+      endIf
+      inumber = fileSystem.NameToInodeNum(&name, currentThread.myProcess.workingDir)
+      if inumber == -1
+         return -1
+      endIf
+      fcb = fileManager.GetFCB(inumber)
+      if fcb == null
+          return -1
+      endIf
+      fcb.inode.SetMode (mode)
+      return 0
+  endFunction
+  -----------------------------  Handle_Sys_Readdir  ---------------------------------
   function  Handle_Sys_Readdir (dfd: int, entPtr: ptr to dirEntry) returns int
-
+     --
+     --
+     --
+     var --pvirSpace: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+        pProcess: ptr to ProcessControlBlock = currentThread.myProcess
+        pOpen: ptr to OpenFile
+       -- sec, offset: int
+       -- retVal: ptr to dirEntry
+     if dfd >= MAX_FILES_PER_PROCESS
+         || dfd < 0
+         || pProcess.fileDescriptor[dfd] == null
+         || pProcess.fileDescriptor[dfd].kind != DIRECTORY
+         return -1
+     endIf
+     pOpen = pProcess.fileDescriptor[dfd].NewReference()
+    /* sec = pOpen.currentPos / PAGE_SIZE
+     offset = pOpen.currentPos % PAGE_SIZE
+     if fcb.relativeSectorInBuffer != sector
+        if !fcb.ReadSector(sec, false)
+	        return -1
+        endIf
+     endIf
+     -- Point to an entry in the buffer	   
+     retVal = (pOpen.fcb.bufferPtr + offset) asPtrTo dirEntry
+     pOpen.Lookup(
+     */
+  return 0
+  endFunction
 -----------------------------  Handle_Sys_Read  ---------------------------------
 
   function Handle_Sys_Read (fileDesc: int, buffer: ptr to char, sizeInBytes: int) returns int
@@ -2301,35 +2358,38 @@ code Kernel
            thisChunkSize, sizeOfFile, retVal: int
            pvirSpace: ptr to AddrSpace = &currentThread.myProcess.addrSpace
            pProcess: ptr to ProcessControlBlock = currentThread.myProcess
+           pOpen: ptr to OpenFile
          
-      print ("Handle_Sys_Read invoked!\n")
-      print ("fileDesc = ")
-      printInt(fileDesc) nl()
-      print ("virt addr of buffer = 0x") printHex (buffer asInteger) nl()
-      print ("sizeInBytes = ")
-      printInt(sizeInBytes)  nl() nl()
+    --  print ("Handle_Sys_Read invoked!\n")
+    -- print ("fileDesc = ")
+    --  printInt(fileDesc) nl()
+    --  print ("virt addr of buffer = 0x") printHex (buffer asInteger) nl()
+    -- print ("sizeInBytes = ")
+    --  printInt(sizeInBytes)  nl() nl()
       --if error occours the function returns -1
       -- fail for directory
       --check if fileDesc is valid
-      if fileDesc > MAX_FILES_PER_PROCESS
+      if fileDesc >= MAX_FILES_PER_PROCESS
+         || fileDesc < 0
          || pProcess.fileDescriptor[fileDesc] == null
          || sizeInBytes < 0
          || pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
          return -1
       endIf
+      pOpen = pProcess.fileDescriptor[fileDesc].NewReference()
       -- check buffer is a valid pointer, and is writable      
        virtAddr = buffer asInteger
        virtPage = virtAddr/PAGE_SIZE
        offset = virtAddr % PAGE_SIZE
        copiedSoFar = 0
-       nextPosInFile = pProcess.fileDescriptor[fileDesc].currentPos
-       sizeOfFile = pProcess.fileDescriptor[fileDesc].fcb.inode.fsize
+       nextPosInFile = pOpen.currentPos
+       sizeOfFile = pOpen.fcb.inode.fsize
        --Each iteration will compute the size of the next chunk and process it..
        while true
           -- compute the size of this chunk
           thisChunkSize = PAGE_SIZE - offset
           if nextPosInFile + thisChunkSize > sizeOfFile
-             thisChunkSize = PAGE_SIZE - nextPosInFile
+             thisChunkSize = sizeOfFile - nextPosInFile
           endIf
           if copiedSoFar + thisChunkSize > sizeInBytes
              thisChunkSize = sizeInBytes - copiedSoFar
@@ -2340,7 +2400,7 @@ code Kernel
           endIf
           -- check for errors
           if virtPage < 0 
-             || virtPage > MAX_PAGES_PER_VIRT_SPACE
+             || virtPage > pvirSpace.numberOfPages -1
              || !pvirSpace.IsValid(virtPage)
              || !pvirSpace.IsWritable(virtPage)
              return -1
@@ -2353,7 +2413,8 @@ code Kernel
              break
           endIf
       endWhile
-      retVal = fileSystem.ReadFile(pProcess.fileDescriptor[fileDesc],buffer, sizeInBytes) 
+      retVal = fileSystem.ReadFile(pOpen,buffer, sizeInBytes) 
+
      return retVal
     endFunction
 
@@ -2369,16 +2430,17 @@ code Kernel
            pvirSpace: ptr to AddrSpace = &currentThread.myProcess.addrSpace
            pProcess: ptr to ProcessControlBlock = currentThread.myProcess
          
-      print ("Handle_Sys_Write invoked!\n")
-      print ("fileDesc = ")
-      printInt(fileDesc) nl()
-      print ("virt addr of buffer = 0x") printHex (buffer asInteger) nl()
-      print ("sizeInBytes = ")
-      printInt(sizeInBytes)  nl() nl()
+       -- print ("Handle_Sys_Write invoked!\n")
+       -- print ("fileDesc = ")
+       -- printInt(fileDesc) nl()
+       -- print ("virt addr of buffer = 0x") printHex (buffer asInteger) nl()
+       -- print ("sizeInBytes = ")
+       -- printInt(sizeInBytes)  nl() nl()
       --if error occours the function returns -1
       -- fail for directory
       --check if fileDesc is valid
-      if fileDesc > MAX_FILES_PER_PROCESS
+      if fileDesc >= MAX_FILES_PER_PROCESS
+         || fileDesc < 0
          || pProcess.fileDescriptor[fileDesc] == null
          || sizeInBytes < 0
          || pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
@@ -2429,15 +2491,16 @@ code Kernel
       --
       var pOpen: ptr to OpenFile
           pProcess: ptr to ProcessControlBlock = currentThread.myProcess
-      print ("Handle_Sys_Seek invoked!\n")
-      print("fileDesc = ")
-      printInt(fileDesc)  nl()
-      print("newCurrentPos = ")
-      printInt(newCurrentPos) nl() nl()
+      --print ("Handle_Sys_Seek invoked!\n")
+      --print("fileDesc = ")
+      --printInt(fileDesc)  nl()
+      --print("newCurrentPos = ")
+      -- printInt(newCurrentPos) nl() nl()
       --if error occours the function returns -1
       -- for directory pos should be 0, otherwise fail
       fileManager.fileManagerLock.Lock()
-      if fileDesc > MAX_FILES_PER_PROCESS
+      if fileDesc >= MAX_FILES_PER_PROCESS
+         || fileDesc < 0
          fileManager.fileManagerLock.Unlock()
          return -1
       endIf
@@ -2466,10 +2529,11 @@ code Kernel
       -- which is assumed to be open. It closes the file.
       --
       var pProcess: ptr to ProcessControlBlock = currentThread.myProcess
-      print ("Handle_Sys_Close invoked!\n")
-      print("fileDesc = ")
-      printInt(fileDesc) nl() nl()
-      if fileDesc > MAX_FILES_PER_PROCESS
+      --print ("Handle_Sys_Close invoked!\n")
+      --print("fileDesc = ")
+      -- printInt(fileDesc) nl() nl()
+      if fileDesc >= MAX_FILES_PER_PROCESS
+         || fileDesc < 0
          ||pProcess.fileDescriptor[fileDesc] == null
          return
       endIf
@@ -2798,7 +2862,9 @@ code Kernel
           -- Next, allocate an OpenFile, waiting if necessary.
 	  -- Might want to change this! (return an error if no openfile)
           open = self.GetAnOpenFile(true) 
-
+          if open == null
+             return null
+          endIf
           -- Connect it to this FCB and set its "numberOfUsers" count.
           fileManagerLock.Lock()
 	  if (fcb.inode.mode & TYPE_FILE) == TYPE_FILE
@@ -2921,7 +2987,10 @@ code Kernel
             fcb = open.fcb
             openFileFreeList.AddToEnd (open)
             anOpenFileBecameFree.Signal (& fileManagerLock)
-            fcb.Release(&fileManagerLock)
+            fcb.numberOfUsers = fcb.numberOfUsers -1
+            if fcb.numberOfUsers <= 0
+               fcb.Release(&fileManagerLock)
+            endIf
           endIf
           fileManagerLock.Unlock()
         endMethod
@@ -3354,7 +3423,12 @@ code Kernel
        var virtAddr, virtPage, offset, copiedSoFar, nextPosInFile: int
            thisChunkSize, sizeOfFile, destAddr: int
            pvirSpace: ptr to AddrSpace = &currentThread.myProcess.addrSpace
-       
+       if file == null
+          || userBuffer == null
+          || sizeInBytes < 0
+          return -1
+       endIf
+       fsLock.Lock()
        virtAddr = userBuffer asInteger
        virtPage = virtAddr/PAGE_SIZE
        offset = virtAddr % PAGE_SIZE
@@ -3366,7 +3440,7 @@ code Kernel
           -- compute the size of this chunk
           thisChunkSize = PAGE_SIZE - offset
           if nextPosInFile + thisChunkSize > sizeOfFile
-             thisChunkSize = PAGE_SIZE - nextPosInFile
+             thisChunkSize = sizeOfFile - nextPosInFile
           endIf
           if copiedSoFar + thisChunkSize > sizeInBytes
              thisChunkSize = sizeInBytes - copiedSoFar
@@ -3377,16 +3451,18 @@ code Kernel
           endIf
           -- check for errors
           if virtPage < 0 
-             || virtPage > MAX_PAGES_PER_VIRT_SPACE
+             || virtPage > pvirSpace.numberOfPages -1
              || !pvirSpace.IsValid(virtPage)
              || !pvirSpace.IsWritable(virtPage)
+             fsLock.Unlock()
              return -1
           endIf
           pvirSpace.SetDirty(virtPage)
           pvirSpace.SetReferenced(virtPage)
-          destAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset          
+          destAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset
           if !fileManager.SynchRead(file,destAddr,nextPosInFile,thisChunkSize)
-             break
+             fsLock.Unlock()
+             return -1
           endIf
           nextPosInFile = nextPosInFile + thisChunkSize
           copiedSoFar = copiedSoFar + thisChunkSize
@@ -3396,6 +3472,8 @@ code Kernel
              break
           endIf
       endWhile
+        file.currentPos = file.currentPos + copiedSoFar
+        fsLock.Unlock()
         return copiedSoFar
     endMethod
 
@@ -3408,7 +3486,12 @@ code Kernel
       var virtAddr, virtPage, offset, copiedSoFar, nextPosInFile: int
            thisChunkSize, sizeOfFile, sourceAddr: int
            pvirSpace: ptr to AddrSpace = &currentThread.myProcess.addrSpace
-       
+       if file == null
+          || userBuffer == null
+          || sizeInBytes < 0
+          return -1
+       endIf
+       fsLock.Lock()
        virtAddr = userBuffer asInteger
        virtPage = virtAddr/PAGE_SIZE
        offset = virtAddr % PAGE_SIZE
@@ -3430,13 +3513,15 @@ code Kernel
           if virtPage < 0 
              || virtPage > MAX_PAGES_PER_VIRT_SPACE
              || !pvirSpace.IsValid(virtPage)
+             fsLock.Unlock()
              return -1
           endIf
           -- pvirSpace.SetDirty(virtPage)
           pvirSpace.SetReferenced(virtPage)
           sourceAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset          
           if !fileManager.SynchWrite(file,sourceAddr,nextPosInFile,thisChunkSize)
-             break
+             fsLock.Unlock()
+             return -1
           endIf
           nextPosInFile = nextPosInFile + thisChunkSize
           copiedSoFar = copiedSoFar + thisChunkSize
@@ -3447,6 +3532,8 @@ code Kernel
           endIf
       endWhile
         file.fcb.inode.fsize = sizeOfFile + copiedSoFar
+        file.currentPos = file.currentPos + copiedSoFar
+        fsLock.Unlock()
         return copiedSoFar
       endMethod
 
@@ -3754,7 +3841,7 @@ code Kernel
       ----------- InodeData . SetMode () -------------
 
       method SetMode ( newMode: int )
-         -- implementation not given
+         mode = newMode
          endMethod
 
     endBehavior
