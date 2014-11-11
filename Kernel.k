@@ -1840,6 +1840,8 @@ code Kernel
         case SYSCALL_STAT:
           return Handle_Sys_Stat (arg1 asPtrTo array of char,
                                     arg2 asPtrTo statInfo)
+        case SYSCALL_OPENDIR:
+          return Handle_Sys_OpenDir (arg1 asPtrTo array of char)
         case SYSCALL_CHMODE:
           return Handle_Sys_ChMode (arg1 asPtrTo array of char,arg2)
         case SYSCALL_READDIR:
@@ -2277,11 +2279,11 @@ code Kernel
 	   paddr: ptr to AddrSpace
            pOpen: ptr to OpenFile
       paddr = &currentThread.myProcess.addrSpace 
-      print ("Handle_Sys_OpenDir invoked!\n")
-      print ("virt addr of filename = 0x") printHex(filename asInteger) nl()     
+      -- print ("Handle_Sys_OpenDir invoked!\n")
+      -- print ("virt addr of filename = 0x") printHex(filename asInteger) nl()     
       len = paddr.GetStringFromVirtual(&name,filename asInteger,MAX_STRING_SIZE)
-      print("filename = ")
-      print(&name)   nl()
+      -- print("filename = ")
+      -- print(&name)   nl()
       if len < 0
          return -1
       endIf
@@ -2344,11 +2346,11 @@ code Kernel
      --
      --
      --
-     var --pvirSpace: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+     var paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
         pProcess: ptr to ProcessControlBlock = currentThread.myProcess
         pOpen: ptr to OpenFile
-       -- sec, offset: int
-       -- retVal: ptr to dirEntry
+        viraddr: int
+        retVal: ptr to dirEntry
      if dfd >= MAX_FILES_PER_PROCESS
          || dfd < 0
          || pProcess.fileDescriptor[dfd] == null
@@ -2356,18 +2358,23 @@ code Kernel
          return -1
      endIf
      pOpen = pProcess.fileDescriptor[dfd].NewReference()
-    /* sec = pOpen.currentPos / PAGE_SIZE
-     offset = pOpen.currentPos % PAGE_SIZE
-     if fcb.relativeSectorInBuffer != sector
-        if !fcb.ReadSector(sec, false)
-	        return -1
-        endIf
+     retVal = pOpen.GetNextEntry(1)
+     if retVal == null
+        return -1
      endIf
-     -- Point to an entry in the buffer	   
-     retVal = (pOpen.fcb.bufferPtr + offset) asPtrTo dirEntry
-     pOpen.Lookup(
-     */
-  return 0
+       viraddr = entPtr asInteger
+      if paddr.CopyBytesToVirtual(viraddr, (&retVal.inodeNum) asInteger, 4) == -1
+         return -1
+      endIf
+      viraddr = viraddr + 4
+      if paddr.CopyBytesToVirtual(viraddr, (&retVal.name) asInteger, 4) == -1
+         return -1
+      endIf
+      viraddr = viraddr + 4
+      if paddr.CopyBytesToVirtual(viraddr, (&retVal.name) asInteger + 4, retVal.name arraySize) == -1
+         return -1
+      endIf
+     return 0
   endFunction
 -----------------------------  Handle_Sys_Read  ---------------------------------
 
@@ -2488,7 +2495,7 @@ code Kernel
           endIf
           -- check for errors
           if virtPage < 0 
-             || virtPage > MAX_PAGES_PER_VIRT_SPACE
+             || virtPage > pvirSpace.numberOfPages - 1
              || !pvirSpace.IsValid(virtPage)
              return -1
           endIf      
@@ -3539,7 +3546,7 @@ code Kernel
           endIf
           -- check for errors
           if virtPage < 0 
-             || virtPage > MAX_PAGES_PER_VIRT_SPACE
+             || virtPage > pvirSpace.numberOfPages - 1
              || !pvirSpace.IsValid(virtPage)
              fsLock.Unlock()
              return -1
