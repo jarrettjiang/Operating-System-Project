@@ -2022,24 +2022,42 @@ code Kernel
       endIf
       viraddr = statPtr asInteger
       if paddr.CopyBytesToVirtual(viraddr, (&inumber) asInteger, 4) == -1
+       fileManager.fileManagerLock.Lock()
+       fcb.Release(&fileManager.fileManagerLock)
+       fileManager.fileManagerLock.Unlock()
          return -1
       endIf
       viraddr = viraddr + 4
       if paddr.CopyBytesToVirtual(viraddr, (&fcb.inode.nlinks) asInteger, 4) == -1
+         fileManager.fileManagerLock.Lock()
+         fcb.Release(&fileManager.fileManagerLock)
+         fileManager.fileManagerLock.Unlock()
          return -1
       endIf
       viraddr = viraddr + 4
       if paddr.CopyBytesToVirtual(viraddr, (&fcb.inode.mode) asInteger, 4) == -1
+         fileManager.fileManagerLock.Lock()
+         fcb.Release(&fileManager.fileManagerLock)
+         fileManager.fileManagerLock.Unlock()
          return -1
       endIf
       viraddr = viraddr + 4
       if paddr.CopyBytesToVirtual(viraddr, (&fcb.inode.fsize) asInteger, 4) == -1
+         fileManager.fileManagerLock.Lock()
+         fcb.Release(&fileManager.fileManagerLock)
+         fileManager.fileManagerLock.Unlock()
          return -1
       endIf
       viraddr = viraddr + 4
       if paddr.CopyBytesToVirtual(viraddr, (&fcb.inode.balloc) asInteger, 4) == -1
+         fileManager.fileManagerLock.Lock()
+         fcb.Release(&fileManager.fileManagerLock)
+         fileManager.fileManagerLock.Unlock()
          return -1
       endIf
+      fileManager.fileManagerLock.Lock()
+      fcb.Release(&fileManager.fileManagerLock)
+      fileManager.fileManagerLock.Unlock()  
       return 0
     endFunction     
    
@@ -2225,7 +2243,7 @@ code Kernel
      -- print(&name)   nl()
       if len < 0
          return -1
-      endIf
+      endIf 
       for i=0 to MAX_FILES_PER_PROCESS - 1
           if currentThread.myProcess.fileDescriptor[i] == null
               break
@@ -2234,20 +2252,17 @@ code Kernel
       if i == MAX_FILES_PER_PROCESS
          return -1   -- no empty slot for Openfile
       endIf
+      -- check permissions
+      
       pOpen = fileManager.Open(&name, currentThread.myProcess.workingDir,flags,mode)
       if pOpen == null
-         return -1
+        return -1
       endIf
       if pOpen.kind == DIRECTORY
          fileManager.Close(pOpen)
          return -1
       endIf
-     -- print("pOpenNumber ") printInt(pOpen.numberOfUsers) nl()
       currentThread.myProcess.fileDescriptor[i] = pOpen
-      --print ("flags = ")
-      --printInt(flags)  nl()
-      --print ("mode = ")
-      --printInt(mode)  nl() nl()
      --if error the function returns -1
     return i
     endFunction
@@ -2301,6 +2316,10 @@ code Kernel
          fcb: ptr to FileControlBlock
          paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
       -- print ("Handle_Sys_ChMode invoked!") nl()
+      
+      if mode < 0 || mode > 7
+         return -1
+      endIf
       namesize = paddr.GetStringFromVirtual(&name,filename asInteger,
 								MAX_STRING_SIZE)
       if namesize < 0
@@ -2309,12 +2328,15 @@ code Kernel
       inumber = fileSystem.NameToInodeNum(&name, currentThread.myProcess.workingDir)
       if inumber == -1
          return -1
-      endIf
+      endIf     
       fcb = fileManager.GetFCB(inumber)
       if fcb == null
           return -1
       endIf
       fcb.inode.SetMode (mode)
+      fileManager.fileManagerLock.Lock()
+      fcb.Release(&fileManager.fileManagerLock)
+      fileManager.fileManagerLock.Unlock()
       return 0
   endFunction
   -----------------------------  Handle_Sys_Readdir  ---------------------------------
@@ -2855,9 +2877,15 @@ code Kernel
           if fcb == null 
             return null
           endIf
-
 	  -- Process Open flags
-
+          if (flags & O_READ) != 0
+             &&(fcb.inode.mode & MODE_READ) == 0
+              return null
+          endIf
+          if (flags & O_WRITE) != 0
+             &&(fcb.inode.mode & MODE_WRITE) == 0
+             return null
+          endIf
 
           -- Next, allocate an OpenFile, waiting if necessary.
 	  -- Might want to change this! (return an error if no openfile)
@@ -3841,7 +3869,15 @@ code Kernel
       ----------- InodeData . SetMode () -------------
 
       method SetMode ( newMode: int )
-         mode = newMode
+         var oldMode: int
+         oldMode = mode & 0x07
+         if oldMode != newMode
+            mode = mode & 0x70
+            newMode = newMode & 0x07
+            mode = mode | newMode
+            dirty = true
+            self.WriteInode()
+         endIf
          endMethod
 
     endBehavior
