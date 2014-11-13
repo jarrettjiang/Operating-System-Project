@@ -43,13 +43,14 @@ code TestProgram4
       -- ExecTest2 ()
       -- ExecTest3 ()
 
-      -- Tests for CSCI 509 and ToyFS
+      -- Tests for ToyFS
       -- TestChMode ()
-       OpenTestPermissions()
+      -- OpenTestPermissions()
       -- TestOpenDirAndMore ()
       -- WriteTestExtend()
       -- ExecTestPermissions()
       -- ErrorTests()
+       OpenTestCreateFile() -- needs to be written.
 
       Sys_Exit (0)
     endFunction
@@ -1459,7 +1460,8 @@ code TestProgram4
 	endIf
       endIf
 
-    
+      print ("\n**********  Test Complete  **********\n\n")
+
     endFunction
 
 ----------------------------  TestOpenDirAndMore ---------------------
@@ -1469,7 +1471,7 @@ code TestProgram4
         dir: dirEntry
 
 	print ("Listing the contents of the root directory.\n")
-	print ("There should be 14 inode numbers and 15 file names.\n")
+	print ("There should be 15 inode numbers and 16 file names.\n")
 	fd = Sys_Opendir ("/")
 	if fd >= 0 
            while Sys_Readdir(fd, &dir) == 0
@@ -1482,6 +1484,9 @@ code TestProgram4
 	   print ("Could not open the directory /.\n")
 	endIf
 	Sys_Close(fd)
+
+        print ("\n**********  Test Complete  **********\n\n")
+
       
      endFunction
 
@@ -1505,6 +1510,7 @@ code TestProgram4
        rv = Sys_ChMode ("file3", 0)
        Check (rv, 0)
 
+       -- should fail for all three
        fd = Sys_Open ("file3", O_READ, 0)
        Check (fd, -1)
        if fd >= 0
@@ -1517,8 +1523,16 @@ code TestProgram4
            Sys_Close(fd)
        endIf
 
-       rv = Sys_ChMode ("file3", MODE_READ)
+       fd = Sys_Open ("file3", O_RDWR, 0)
+       Check (fd, -1)
+       if fd >= 0
+           Sys_Close(fd)
+       endIf
 
+       rv = Sys_ChMode ("file3", MODE_READ)
+       Check (rv, 0)
+
+       -- Should fail for WRITE and RDWR
        fd = Sys_Open ("file3", O_READ, 0)
        Check (fd, 0)
        if fd >= 0
@@ -1538,7 +1552,9 @@ code TestProgram4
        endIf
 
       rv = Sys_ChMode ("file3", MODE_WRITE)
+       Check (rv, 0)
 
+       -- Should fail for READ and RDWR
        fd = Sys_Open ("file3", O_READ, 0)
        Check (fd, -1)
        if fd >= 0
@@ -1558,7 +1574,9 @@ code TestProgram4
        endIf
        
       rv = Sys_ChMode ("file3", MODE_WRITE | MODE_READ)
+       Check (rv, 0)
 
+       -- All three should open correctly
        fd = Sys_Open ("file3", O_READ, 0)
        Check (fd, 0)
        if fd >= 0
@@ -1576,6 +1594,15 @@ code TestProgram4
        if fd >= 0
            Sys_Close(fd)
        endIf
+
+       -- Must specify read/write or rdwr
+       fd = Sys_Open ("file3", O_CREATE, 0)
+       Check (fd, -1)
+       if fd >= 0
+            Sys_Close(fd)
+	endIf
+
+       print ("\n**********  Test Complete  **********\n\n")
  
      endFunction
 
@@ -1666,6 +1693,7 @@ code TestProgram4
 	-- Done using the fd
 	Sys_Close (fd)
 	
+       print ("\n**********  Test Complete  **********\n\n")
 	
      endFunction
 
@@ -1715,6 +1743,7 @@ code TestProgram4
          print ("Okay.\n")
        endIf
 
+       print ("Setting execute permissions only on TestProgram4a\n")
        rv = Sys_ChMode ("TestProgram4a", MODE_EXE)
        if  rv != 0
 	   print ("**** ERROR: Can't set execute permission. Aborting.\n")
@@ -1747,6 +1776,8 @@ code TestProgram4
 	   print ("**** ERROR: Can't set execute permission. Aborting.\n")
 	   return
 	endIf
+
+       print ("\n**********  Test Complete  **********\n\n")
 
      endFunction
 
@@ -1801,7 +1832,143 @@ code TestProgram4
       fd = Sys_Open (".", MODE_READ, 0)
       Check (fd, -1)
 
+       print ("\n**********  Test Complete  **********\n\n")
       
+    endFunction
+
+---------------------  OpenTestCreateFile  ---------------------------
+
+  function OpenTestCreateFile ()
+     var fd: int
+         rv: int
+         ix: int
+         sb: statInfo
+         buff: array [30] of char = new array of char { 30 of 'x' }
+
+
+       print ("\n*** Testing O_CREATE and O_MAYCREATE with Sys_Open\n")
+
+       -- open existing with MAYCREATE => success
+       fd = Sys_Open ("file1", O_READ | O_MAYCREATE, 0)
+       Check (fd, 0)
+       Sys_Close (fd)
+
+       -- open existing with CREATE => failure
+       fd = Sys_Open ("file1", O_READ | O_CREATE, 0)
+       Check (fd, -1)
+       Sys_Close (fd)
+
+       -- open new with MAYCREATE and CREATE, write, check stat, read ...
+       print ("Creating 'newFile'\n")
+       rv = Sys_Stat ("newFile", &sb)
+       if rv > -1 
+           print ("Open with O_CREATE test already done, delete DISK and remake.\n")
+	   return
+       endIf
+
+       fd = Sys_Open ("newFile", O_RDWR | O_CREATE, 6)
+       Check (fd, 0)
+       if fd == 0
+	   
+          DoWrite   (fd, true,  0, "abcdefghijklmnopqrstuvwxyz")
+	  DoWrite   (fd, true, 26, "zyxwvutsrqponmlkjihgfedcba")
+	  DoWrite   (fd, true, 52, "aaaaabbbbbcccccdddddeeeeef")
+	  DoWrite   (fd, true, 78, "ggggghhhhhiiiiijjjjjkkkkkl")
+
+	  CheckFile (fd, true, 78, "ggggghhhhhiiiiijjjjjkkkkkl")
+	  CheckFile (fd, true, 52, "aaaaabbbbbcccccdddddeeeeef")
+	  CheckFile (fd, true, 26, "zyxwvutsrqponmlkjihgfedcba")
+	  CheckFile (fd, true,  0, "abcdefghijklmnopqrstuvwxyz")
+
+       endIf
+       Sys_Close (fd)
+
+       rv = Sys_Stat ("newFile", &sb)
+       if rv < 0
+	   print ("ERROR: Could not stat the newly created file.\n")
+       else
+	   print ("Checking stat information on 'newFile'\n")
+	   Check (sb.inodeNum, 16)
+	   Check (sb.nlinks, 1)
+	   Check (sb.mode, TYPE_FILE | MODE_READ | MODE_WRITE)
+	   Check (sb.fsize, 104)
+	   Check (sb.balloc, 1)
+       endIf
+
+       fd = Sys_Open ("newFile", O_READ, 0)
+       if fd == 0
+	  print ("Checking that file can be open and read again\n")
+	  CheckFile (fd, true, 78, "ggggghhhhhiiiiijjjjjkkkkkl")
+	  CheckFile (fd, true, 26, "zyxwvutsrqponmlkjihgfedcba")
+	  CheckFile (fd, true,  0, "abcdefghijklmnopqrstuvwxyz")
+	  CheckFile (fd, true, 52, "aaaaabbbbbcccccdddddeeeeef")
+
+	  -- Final test .... does write work?
+	  rv = Sys_Seek (fd, 104)
+	  Check (rv, 104)
+	  rv = Sys_Write (fd, &buff[0], 30)
+	  if rv != -1
+	      print ("ERROR: Write succeded when file opened O_READ\n")
+	  else
+	      print ("Okay.\n")
+	  endIf
+       else
+	  print ("ERROR: could not open 'newFile' a second time.\n")
+       endIf
+       Sys_Close(fd)
+
+       -- Check for reading on a write only file 
+       fd = Sys_Open ("newFile", O_WRITE, 0)
+       if fd == 0
+	   rv = Sys_Read (fd, &buff[0], 30)
+	   if rv != -1
+	      print ("ERROR: Read succeded when file opened with O_WRITE\n")
+	   else
+	      print ("Okay.\n")
+	   endIf
+       else
+	  print ("ERROR: could not open 'newFile' a third time.\n")
+       endIf
+       Sys_Close(fd)
+
+       print ("Creating 'newFile1'\n")
+       fd = Sys_Open ("newFile1", O_RDWR | O_MAYCREATE, 6)
+       Check (fd, 0)
+       Sys_Close (fd)
+
+       rv = Sys_Stat ("newFile1", &sb)
+       if rv < 0
+	   print ("ERROR: Could not stat the newly created file.\n")
+       else
+	   print ("Checking stat information on 'newFile1'\n")
+	   Check (sb.inodeNum, 17)
+	   Check (sb.nlinks, 1)
+	   Check (sb.mode, TYPE_FILE | MODE_READ | MODE_WRITE)
+	   Check (sb.fsize, 0)
+	   Check (sb.balloc, 0)
+       endIf
+
+       fd = Sys_Open ("newFile1", O_READ, 0)
+       Check (fd, 0)
+       Sys_Close (fd)
+
+       -- Final check ... write a bunch of data ... We'll use the
+       -- checkBuffer ....
+
+       fd=Sys_Open ("newFile1", O_RDWR, 0)
+       if fd == 0
+	   for ix = 0 to 9999
+	      checkBuffer[ix] = intToChar(32 + ix % 26) 
+           endFor
+	   for ix = 0 to 40 
+              rv = Sys_Write (fd, &checkBuffer[0], 10000)
+	   endFor
+       else
+	  print ("ERROR: could not open newfile1 for writing.\n")
+       endIf
+
+       print ("\n**********  Test Complete  **********\n\n")
+       
     endFunction
 
 -----------------------------  Check  ---------------------------------

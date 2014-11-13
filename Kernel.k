@@ -1105,7 +1105,7 @@ code Kernel
     -- free the resources held by this process and will terminate the
     -- current thread.
     --
-    var oldStat: int
+    var oldStat, i: int
         pProcess: ptr to ProcessControlBlock = currentThread.myProcess
       pProcess.exitStatus = exitStatus
       oldStat = SetInterruptsTo(DISABLED)
@@ -1114,6 +1114,12 @@ code Kernel
       currentThread.isUserThread = false
       oldStat = SetInterruptsTo(oldStat)
       ------ remember to close any open files here
+      for i=0 to MAX_FILES_PER_PROCESS -1
+          if pProcess.fileDescriptor[i] != null
+            fileManager.Close(pProcess.fileDescriptor[i])
+            pProcess.fileDescriptor[i] = null
+          endIf
+      endFor
       pProcess.workingDir.numberOfUsers = pProcess.workingDir.numberOfUsers - 1
       frameManager.ReturnAllFrames(&pProcess.addrSpace)
       processManager.TurnIntoZombie(pProcess)
@@ -1932,7 +1938,10 @@ code Kernel
       oldUserPC = GetOldUserPCFromSystemStack()
       -- copy the fileDescriptor array here
       for i=0 to MAX_FILES_PER_PROCESS -1
-          newPCB.fileDescriptor[i] = currentThread.myProcess.fileDescriptor[i]
+          if currentThread.myProcess.fileDescriptor[i] != null
+             newPCB.fileDescriptor[i] = 
+                   currentThread.myProcess.fileDescriptor[i].NewReference()
+          endIf
       endFor
       pThread.Fork(ResumeChildAfterFork, oldUserPC)
       return newPCB.pid
@@ -2023,6 +2032,9 @@ code Kernel
           return -1
       endIf
       viraddr = statPtr asInteger
+      if viraddr >= PAGE_SIZE * paddr.numberOfPages - sizeOf statInfo
+         return -1
+      endIf
       if paddr.CopyBytesToVirtual(viraddr, (&inumber) asInteger, 4) == -1
        fileManager.fileManagerLock.Lock()
        fcb.Release(&fileManager.fileManagerLock)
@@ -2092,8 +2104,9 @@ code Kernel
       endIf
       -- print("filename = ")
       -- print(&name) nl() nl()
-      exeFile = fileManager.Open(&name,fileSystem.rootDirectory,O_READ,TYPE_FILE)
+      exeFile = fileManager.Open(&name,fileSystem.rootDirectory,0,TYPE_FILE)
       if exeFile == null
+         || (exeFile.fcb.inode.mode & MODE_EXE) != MODE_EXE
         -- print("Open file error in handle sys exec\n")
          return -1
       endIf
@@ -2254,7 +2267,6 @@ code Kernel
       if i == MAX_FILES_PER_PROCESS
          return -1   -- no empty slot for Openfile
       endIf
-      -- check permissions
       
       pOpen = fileManager.Open(&name, currentThread.myProcess.workingDir,flags,mode)
       if pOpen == null
@@ -2362,18 +2374,21 @@ code Kernel
      if retVal == null
         return -1
      endIf
-       viraddr = entPtr asInteger
-      if paddr.CopyBytesToVirtual(viraddr, (&retVal.inodeNum) asInteger, 4) == -1
-         return -1
-      endIf
-      viraddr = viraddr + 4
-      if paddr.CopyBytesToVirtual(viraddr, (&retVal.name) asInteger, 4) == -1
-         return -1
-      endIf
-      viraddr = viraddr + 4
-      if paddr.CopyBytesToVirtual(viraddr, (&retVal.name) asInteger + 4, retVal.name arraySize) == -1
-         return -1
-      endIf
+     viraddr = entPtr asInteger
+     if viraddr >= PAGE_SIZE * paddr.numberOfPages - sizeOf dirEntry
+        return -1
+     endIf
+     if paddr.CopyBytesToVirtual(viraddr, (&retVal.inodeNum) asInteger, 4) == -1
+        return -1
+     endIf
+     viraddr = viraddr + 4
+     if paddr.CopyBytesToVirtual(viraddr, (&retVal.name) asInteger, 4) == -1
+        return -1
+     endIf
+     viraddr = viraddr + 4
+     if paddr.CopyBytesToVirtual(viraddr, (&retVal.name) asInteger + 4, retVal.name arraySize) == -1
+        return -1
+     endIf
      return 0
   endFunction
 -----------------------------  Handle_Sys_Read  ---------------------------------
@@ -2403,6 +2418,7 @@ code Kernel
          || pProcess.fileDescriptor[fileDesc] == null
          || sizeInBytes < 0
          || pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
+         || (pProcess.fileDescriptor[fileDesc].flags & O_READ) != O_READ 
          return -1
       endIf
       pOpen = pProcess.fileDescriptor[fileDesc].NewReference()
@@ -2473,6 +2489,7 @@ code Kernel
          || pProcess.fileDescriptor[fileDesc] == null
          || sizeInBytes < 0
          || pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
+         || (pProcess.fileDescriptor[fileDesc].flags & O_WRITE) != O_WRITE
          return -1
       endIf
       -- check buffer is a valid pointer, and is writable      
@@ -2855,7 +2872,7 @@ code Kernel
 	  endIf
 
           -- check falgs
-          if (mode & TYPE_DIR) != 0 && (flags & O_READ) == 0
+          if (mode & TYPE_DIR) == TYPE_DIR && (flags & O_READ) != O_READ
              return null
           endIf
 
@@ -2863,19 +2880,20 @@ code Kernel
 	  iNum = fileSystem.NameToInodeNum (filename, dir)
 	  if iNum < 0
 	     -- Should we create a file here?
-             if (flags & O_CREATE) == 0
-                && (flags & O_MAYCREATE) == 0                 
+             if (flags & O_CREATE) != O_CREATE
+                && (flags & O_MAYCREATE) != O_MAYCREATE                 
 	        return null
             endIf
           else
-             if (flags & O_CREATE) != 0  -- file exist
+             if (flags & O_CREATE) == O_CREATE  -- file exist
                 return null
              endIf
 	  endIf
-
-	  -- Is there an existing file when we must create?  (Unimplemented)
+	  -- Is there an existing file when we must create?
           if iNum < 0 -- flags is O_CREATE or O_MAYCREATE, create a new file
-           -- open =  fileSystem.Create(dir, filename,flags,mode)
+             mode = mode | TYPE_FILE
+             open =  fileSystem.CreateFile(dir, filename, flags, mode)
+             return open
           endIf -- havn't finish here
 
           -- First, get an FCB that points to the file.
@@ -2885,15 +2903,14 @@ code Kernel
             return null
           endIf
 	  -- Process Open flags
-          if (flags & O_READ) != 0
-             &&(fcb.inode.mode & MODE_READ) == 0
+          if (flags & O_READ) == O_READ
+             &&(fcb.inode.mode & MODE_READ) != MODE_READ
               return null
           endIf
-          if (flags & O_WRITE) != 0
-             &&(fcb.inode.mode & MODE_WRITE) == 0
+          if (flags & O_WRITE) == O_WRITE
+             &&(fcb.inode.mode & MODE_WRITE) != MODE_WRITE
              return null
           endIf
-
           -- Next, allocate an OpenFile, waiting if necessary.
 	  -- Might want to change this! (return an error if no openfile)
           open = self.GetAnOpenFile(true) 
@@ -2907,12 +2924,9 @@ code Kernel
 	  else
 	     open.Init (DIRECTORY, fcb, flags & 3)
 	  endIf
-
           -- Release FileManagerLock and return a pointer to the OpenFile object
           fileManagerLock.Unlock()
-
           -- printHexVar ("open.fcb", open.fcb asInteger)
-
           return open
         endMethod
 
@@ -3526,7 +3540,7 @@ code Kernel
           || sizeInBytes < 0
           return -1
        endIf
-       fsLock.Lock()
+     --  fsLock.Lock()
        virtAddr = userBuffer asInteger
        virtPage = virtAddr/PAGE_SIZE
        offset = virtAddr % PAGE_SIZE
@@ -3548,14 +3562,14 @@ code Kernel
           if virtPage < 0 
              || virtPage > pvirSpace.numberOfPages - 1
              || !pvirSpace.IsValid(virtPage)
-             fsLock.Unlock()
+     --        fsLock.Unlock()
              return -1
           endIf
           -- pvirSpace.SetDirty(virtPage)
           pvirSpace.SetReferenced(virtPage)
           sourceAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset          
           if !fileManager.SynchWrite(file,sourceAddr,nextPosInFile,thisChunkSize)
-             fsLock.Unlock()
+         --    fsLock.Unlock()
              return -1
           endIf
           nextPosInFile = nextPosInFile + thisChunkSize
@@ -3566,7 +3580,10 @@ code Kernel
              break
           endIf
       endWhile
+      fsLock.Lock()
         file.fcb.inode.fsize = sizeOfFile + copiedSoFar
+        file.fcb.inode.dirty = true -- call writenode?
+     --   file.fcb.inode.WriteInode()
         file.currentPos = file.currentPos + copiedSoFar
         fsLock.Unlock()
         return copiedSoFar
@@ -3575,8 +3592,43 @@ code Kernel
       --------------- ToyFs . CreateFile  ----------------
     method CreateFile (dir : ptr to OpenFile, filename: String, flags: int, mode: int)
            returns ptr to OpenFile
-        FatalError ("ToyFs . CreateFile Not Implemented.")
-        return null
+        -- create a empty file
+        -- use Openfile.AddEntry, self.AllocInode
+        var inum: int
+            fcb: ptr to FileControlBlock
+            pOpen: ptr to OpenFile
+            
+       if dir == null
+          || (mode & TYPE_FILE) == 0
+          return null
+       endIf
+       if (flags & O_CREATE) != O_CREATE
+          && (flags & O_MAYCREATE) != O_MAYCREATE
+          return null
+       endIf
+       inum = self.AllocInode()
+       if inum == -1
+          return null
+       endIf
+       if !dir.AddEntry(inum, filename)
+          return null
+       endIf
+      fcb = fileManager.GetFCB(inum)
+      if fcb == null
+         return null
+      endIf
+      fcb.inode.SetMode(mode)
+      pOpen = fileManager.GetAnOpenFile(true)
+      if pOpen == null
+         fileManager.fileManagerLock.Lock()
+         fcb.Release(&fileManager.fileManagerLock)
+         fileManager.fileManagerLock.Unlock()
+         return null
+      endIf
+      fileManager.fileManagerLock.Lock()
+      pOpen.Init(FILE, fcb, flags & 3)
+      fileManager.fileManagerLock.Unlock()
+      return pOpen
       endMethod
 
       --------------- ToyFs . MakeDir  ----------------
@@ -3812,10 +3864,13 @@ code Kernel
           newSector = fileSystem.AllocDataBlock()
           if logicalSector < 10
              direct[logicalSector] = newSector
+             nlinks = nlinks + 1
           else
             if logicalSector < 2058
                if indir1 == 0
                   indir1 = fileSystem.AllocDataBlock()
+                  balloc  = balloc + 1
+                  nlinks = nlinks + 1 -- is indirect link included in nlinks?
                  if indSec <= 0
                     self.GetIndirect()
                  endIf
@@ -3831,9 +3886,10 @@ code Kernel
 	      FatalError ("Double Indirect not implemented.")
             endIf
             self.SaveIndirect()
-            dirty = true
-            self.WriteInode()
           endIf
+          balloc  = balloc + 1
+          dirty = true
+          self.WriteInode()
           return true
       endMethod
 
@@ -3876,16 +3932,27 @@ code Kernel
       ----------- InodeData . SetMode () -------------
 
       method SetMode ( newMode: int )
-         var oldMode: int
-         oldMode = mode & 0x07
-         if oldMode != newMode
-            mode = mode & 0x70
-            newMode = newMode & 0x07
-            mode = mode | newMode
-            dirty = true
-            self.WriteInode()
+        var types, rwx: int
+         if mode == newMode
+            return
          endIf
-         endMethod
+         types = newMode & 0xf0
+         rwx = newMode & 0x0f
+         if types == 0
+            mode = mode & 0xf0
+            mode = mode | rwx
+        else
+          if types != 0
+             && rwx == 0
+            mode = mode & 0x0f
+            mode = mode | types
+          else
+            mode = newMode
+          endIf
+        endIf
+        dirty = true
+        self.WriteInode()
+        endMethod
 
     endBehavior
 
