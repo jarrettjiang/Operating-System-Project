@@ -3617,6 +3617,7 @@ code Kernel
       if fcb == null
          return null
       endIf
+      fcb.inode.nlinks = 1 -- number of directory entries, file is 1
       fcb.inode.SetMode(mode)
       pOpen = fileManager.GetAnOpenFile(true)
       if pOpen == null
@@ -3864,13 +3865,11 @@ code Kernel
           newSector = fileSystem.AllocDataBlock()
           if logicalSector < 10
              direct[logicalSector] = newSector
-             nlinks = nlinks + 1
           else
             if logicalSector < 2058
                if indir1 == 0
                   indir1 = fileSystem.AllocDataBlock()
                   balloc  = balloc + 1
-                  nlinks = nlinks + 1 -- is indirect link included in nlinks?
                  if indSec <= 0
                     self.GetIndirect()
                  endIf
