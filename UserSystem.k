@@ -259,7 +259,14 @@ code UserSystem
     function Sys_Readdir (dfd: int, entPtr: ptr to dirEntry) returns int
 	return DoSyscall (SYSCALL_READDIR, dfd, entPtr asInteger, 0, 0)
       endFunction
-
+-----------------------------  Sys_Dup  ---------------------------------
+    function Sys_Dup (fd: int) returns int
+        return DoSyscall (SYSCALL_DUP, fd, 0, 0, 0)
+    endFunction
+-----------------------------  Sys_Pipe  ---------------------------------
+    function  Sys_Pipe (fds: ptr to array[2] of int) returns int
+        return DoSyscall (SYSCALL_PIPE, fds asInteger, 0, 0, 0)
+    endFunction
 -----------------------------  StrEqual  ---------------------------------
 
   function StrEqual (s1, s2: String) returns bool

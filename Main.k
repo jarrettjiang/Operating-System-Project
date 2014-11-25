@@ -35,6 +35,10 @@ code Main
       fileManager = new FileManager
       fileManager.Init ()
 
+      -- Initialize the SerialDriver
+      serialDriver = new SerialDriver
+      serialDriver.Init()
+
       -- Initialize the FileSystem
       fileSystem = new ToyFs
       fileSystem.Init ()

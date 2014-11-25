@@ -12,9 +12,7 @@ code TestProgram2
       if cmdArgs == null
         print ("   None provided.\n")
       else
---print("args num: ") printInt(cmdArgs arraySize) nl()
         for ix = 0 to cmdArgs arraySize - 1
---printInt(cmdArgs[ix] asInteger) nl()
            print ("   arg[") printInt(ix) print("] is ") print (cmdArgs[ix]) nl()
         endFor
         nl ()

@@ -26,7 +26,9 @@ header Syscall
        SYSCALL_RMDIR,
        SYSCALL_CHDIR,
        SYSCALL_OPENDIR,
-       SYSCALL_READDIR
+       SYSCALL_READDIR,
+       SYSCALL_DUP,
+       SYSCALL_PIPE
   
   type
 

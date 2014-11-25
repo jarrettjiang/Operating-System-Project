@@ -37,6 +37,9 @@ header UserSystem
     Sys_Opendir (filename: String) returns int
     Sys_Readdir (dfd: int, entPtr: ptr to dirEntry) returns int
  
+ -- More
+    Sys_Dup (fd: int) returns int
+    Sys_Pipe (fds: ptr to array[2] of int) returns int
   --
   -- The following routines are implemented in UserRuntime.s:
   --

@@ -5,7 +5,7 @@ header Kernel
 
   const
 
-    INIT_NAME = "TestProgram4"
+    INIT_NAME = "TestProgram5"
 
     SYSTEM_STACK_SIZE = 1000       -- in words
     STACK_SENTINEL = 0x24242424    -- in ASCII, this is "$$$$"
@@ -23,13 +23,16 @@ header Kernel
     MAX_ARRAY_NUMBER = 100
     MAX_ARGS_SPACE = 4096
     MAX_ARG_SIZE = 50
-
-    MAX_NUMBER_OF_PROCESSES = 10
-    MAX_STRING_SIZE = 20
+    
+    -- Define for assignment7
+    MAX_NUMBER_OF_PIPES = 20
+    
+    MAX_NUMBER_OF_PROCESSES = 20
+    MAX_STRING_SIZE = 80
     MAX_PAGES_PER_VIRT_SPACE = 25
     MAX_FILES_PER_PROCESS = 10
-    MAX_NUMBER_OF_FILE_CONTROL_BLOCKS = 15
-    MAX_NUMBER_OF_OPEN_FILES = 15
+    MAX_NUMBER_OF_FILE_CONTROL_BLOCKS = 40
+    MAX_NUMBER_OF_OPEN_FILES = 40
     USER_STACK_SIZE_IN_PAGES = 1
     NUMBER_OF_ENVIRONMENT_PAGES = 0
 
@@ -65,7 +68,7 @@ header Kernel
     diskDriver: DiskDriver
     fileManager: FileManager
     fileSystem: ToyFs
-    --serialDriver: SerialDriver
+    serialDriver: SerialDriver
 
   functions
 
@@ -103,6 +106,12 @@ header Kernel
     Handle_Sys_OpenDir (filename: ptr to array of char) returns int
     Handle_Sys_ChMode (filename: String, mode: int) returns int
     Handle_Sys_Readdir (dfd: int, entPtr: ptr to dirEntry) returns int
+    Handle_Sys_Dup (fd: int) returns int
+    Handle_Sys_Pipe (fds: ptr to array[2] of int) returns int
+    Handle_Sys_Link (oldname, newname: String) returns int
+    Handle_Sys_Unlink (filename: String) returns int
+    Handle_Sys_Mkdir (filename: String) returns int
+    Handle_Sys_Rmdir (filename: String) returns int
 
     InitializeScheduler ()
     Run (nextThread: ptr to Thread)
@@ -277,7 +286,7 @@ header Kernel
     methods
       Init ()
       Print ()
-      GetAFrame () returns int                         -- returns addr of frame
+      GetAFrame (wait: bool) returns int        -- returns addr of frame
       PutAFrame ( frameAddr: int )                     -- done using a frame
       GetNewFrames (aPageTable: ptr to AddrSpace, numFramesNeeded: int)
       ReturnAllFrames (aPageTable: ptr to AddrSpace)
@@ -354,6 +363,9 @@ header Kernel
       anOpenFileBecameFree: Condition
       openFileFreeList: List [OpenFile]
       serialTerminalFile: OpenFile
+      pipeTable: array [MAX_NUMBER_OF_PIPES] of Pipe
+      --anPipeBecameFree: Condition
+      pipeFreeList: List [Pipe]
 
     methods
       Init ()
@@ -361,7 +373,9 @@ header Kernel
       LookupFCB (inodeNum: int) returns ptr to FileControlBlock
       GetFCB ( inodeNum: int) returns ptr to FileControlBlock  -- null if errors
       GetAnOpenFile (block: bool) returns ptr to OpenFile
-
+      -- for manage pipes
+      GetAnPipe () returns ptr to Pipe
+      ReturnPipe (pPipe: ptr to Pipe)
       -- Open returns null if errors
       Open (filename: String, dir: ptr to OpenFile, flags, mode: int) returns ptr to OpenFile
       Close (open: ptr to OpenFile)
@@ -494,6 +508,7 @@ header Kernel
       numberOfUsers: int             -- count of Processes pointing here
       addPos: int    		     -- byte in directory to add last failed lookup
       flags: int		     -- How opened, O_READ / O_WRITE 
+      pipe: ptr to Pipe
     methods
       Print ()
       Init (fKind: int, fFcb: ptr to FileControlBlock, openFlags: int)
@@ -516,8 +531,61 @@ header Kernel
 
       -- AddEntry returns true if entry is added
       AddEntry (inodeNum: int, filename: String) returns bool
-
+      RemoveEntry (filename: String, ent: ptr to dirEntry) returns bool
 
   endClass
+  -----------------------------  SerialDriver  ---------------------------------
 
+const
+  SERIAL_CHARACTER_AVAILABLE_BIT                 = 0x00000001
+  SERIAL_OUTPUT_READY_BIT                        = 0x00000002
+  SERIAL_STATUS_WORD_ADDRESS                     = 0x00FFFF00
+  SERIAL_DATA_WORD_ADDRESS                       = 0x00FFFF04
+
+  class SerialDriver
+    superclass Object
+    fields
+      initialized : bool
+      serial_status_word_address: ptr to int
+      serial_data_word_address: ptr to int
+      serialLock: Mutex
+      getBuffer: array [SERIAL_GET_BUFFER_SIZE] of char
+      getBufferSize: int
+      getBufferNextIn: int
+      getBufferNextOut: int
+      getCharacterAvail: Condition
+      putBuffer: array [SERIAL_PUT_BUFFER_SIZE] of char
+      putBufferSize: int
+      putBufferNextIn: int
+      putBufferNextOut: int
+      putBufferSem: Semaphore
+      serialNeedsAttention: Semaphore
+      serialHandlerThread: Thread
+    methods
+      Init ()
+      PutChar (value: char)
+      GetChar () returns char
+      SerialHandler ()
+  endClass
+  
+  --------------------------------- Pipe -----------------------------------------------
+  class Pipe
+    superclass Listable
+    fields
+      bufferFrame: int -- Buffer frame,needs to be acquired at open time
+      head, tail: int -- Circular buffer
+      pipeMutex: Mutex
+      charsInPipe: int
+      readWait: bool
+      writeWait: bool
+      readQueue: Condition
+      writeQueue: Condition
+    methods
+      Init()
+      Open () returns bool
+      Read (buffer:ptr to char, sizeInBytes: int) returns int
+      Write (buffer: ptr to char, sizeInBytes: int) returns int
+      Close()
+  endClass
+  
 endHeader

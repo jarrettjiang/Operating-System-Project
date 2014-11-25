@@ -1176,7 +1176,7 @@ code Kernel
 
       ----------  FrameManager . GetAFrame  ----------
 
-      method GetAFrame () returns int
+      method GetAFrame (wait: bool) returns int
         --
         -- Allocate a single frame and return its physical address.  If no frames
         -- are currently available, wait until the request can be completed.
@@ -1185,7 +1185,11 @@ code Kernel
 
           -- Acquire exclusive access to the frameManager data structure...
           frameManagerLock.Lock ()
-
+          
+          if numberFreeFrames < 1 && !wait
+             return -1
+          endIf
+          
           -- Wait until we have enough free frames to entirely satisfy the request...
           while numberFreeFrames < 1
             newFramesAvailable.Wait (&frameManagerLock)
@@ -1677,7 +1681,9 @@ code Kernel
     -- for the duration of its execution.
     --
       currentInterruptStatus = DISABLED
-      -- NOT IMPLEMENTED
+      if serialDriver.initialized
+         serialDriver.serialNeedsAttention.Up()
+      endIf
     endFunction
 -----------------------------  IllegalInstructionHandler  --------------------------
 
@@ -1852,6 +1858,19 @@ code Kernel
           return Handle_Sys_ChMode (arg1 asPtrTo array of char,arg2)
         case SYSCALL_READDIR:
           return Handle_Sys_Readdir (arg1,arg2 asPtrTo dirEntry)
+        case SYSCALL_DUP:
+          return Handle_Sys_Dup (arg1)
+        case SYSCALL_PIPE:
+          return Handle_Sys_Pipe (arg1 asPtrTo array of int)
+        case SYSCALL_LINK:
+          return Handle_Sys_Link (arg1 asPtrTo array of char,
+                                          arg2 asPtrTo array of char)
+        case SYSCALL_UNLINK:
+          return Handle_Sys_Unlink (arg1 asPtrTo array of char)
+        case SYSCALL_MKDIR:
+          return Handle_Sys_Mkdir (arg1 asPtrTo array of char)
+        case SYSCALL_RMDIR:
+          return Handle_Sys_Rmdir (arg1 asPtrTo array of char)
         case SYSCALL_CLOSE:
           Handle_Sys_Close (arg1)
           return 0
@@ -2118,10 +2137,10 @@ code Kernel
          frameManager.ReturnAllFrames(&addrSpace)
          return -1
       endIf
-      newUStackTop = addrSpace.numberOfPages*PAGE_SIZE
+      newUStackTop = 0 --fixed a bug here, when args is null,newUStackTop should be 0
       --copy args from old addr sapce to new addr space
       if args != null
-         ptrArgs = newUStackTop
+         ptrArgs = addrSpace.numberOfPages*PAGE_SIZE
         newUStackTop = CopyToNewSpace(ptrArgs,args,&addrSpace)
         if newUStackTop == -1
            frameManager.ReturnAllFrames(&addrSpace)
@@ -2134,7 +2153,11 @@ code Kernel
       paddr = &currentThread.myProcess.addrSpace     
       fileManager.Close(exeFile)  --close file
       currentThread.name = &name
-      initUserStackTop = newUStackTop
+      if newUStackTop != 0
+         initUserStackTop = newUStackTop
+      else
+         initUserStackTop = addrSpace.numberOfPages*PAGE_SIZE
+      endIf
       initSysStackTop = (&currentThread.systemStack[SYSTEM_STACK_SIZE -1]) asInteger
       oldStat = SetInterruptsTo(DISABLED)
       paddr.SetToThisPageTable()
@@ -2259,6 +2282,7 @@ code Kernel
       if len < 0
          return -1
       endIf 
+      
       for i=0 to MAX_FILES_PER_PROCESS - 1
           if currentThread.myProcess.fileDescriptor[i] == null
               break
@@ -2267,7 +2291,10 @@ code Kernel
       if i == MAX_FILES_PER_PROCESS
          return -1   -- no empty slot for Openfile
       endIf
-      
+      if StrEqual ( &name, "/dev/serial")  -- open serial device
+          currentThread.myProcess.fileDescriptor[i] = &fileManager.serialTerminalFile
+          return i
+      endIf
       pOpen = fileManager.Open(&name, currentThread.myProcess.workingDir,flags,mode)
       if pOpen == null
         return -1
@@ -2403,6 +2430,9 @@ code Kernel
            pvirSpace: ptr to AddrSpace = &currentThread.myProcess.addrSpace
            pProcess: ptr to ProcessControlBlock = currentThread.myProcess
            pOpen: ptr to OpenFile
+           charVal: char
+           isSet: bool
+           phyAddr, i: int
          
     --  print ("Handle_Sys_Read invoked!\n")
     -- print ("fileDesc = ")
@@ -2416,8 +2446,106 @@ code Kernel
       if fileDesc >= MAX_FILES_PER_PROCESS
          || fileDesc < 0
          || pProcess.fileDescriptor[fileDesc] == null
-         || sizeInBytes < 0
-         || pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
+         || sizeInBytes <= 0
+    --     || sizeInBytes > serialDriver.getBufferSize -- may not need ??
+         return -1
+      endIf   
+      ----------------for reading from serial device
+      if pProcess.fileDescriptor[fileDesc].kind == TERMINAL
+         virtAddr = buffer asInteger
+        virtPage = virtAddr/PAGE_SIZE
+        offset = virtAddr % PAGE_SIZE
+        copiedSoFar = 0
+        if virtPage < 0 
+           || virtPage > pvirSpace.numberOfPages -1
+           || !pvirSpace.IsValid(virtPage)
+           || !pvirSpace.IsWritable(virtPage)
+           return -1
+        endIf
+        isSet = false
+        while copiedSoFar < sizeInBytes
+           charVal = serialDriver.GetChar()
+           if charVal == 0x04
+              break
+           endIf
+           if !isSet
+              pvirSpace.SetDirty(virtPage)
+              pvirSpace.SetReferenced(virtPage)
+              isSet = true
+           endIf
+           if charVal == '\r'
+              charVal = '\n'
+           endIf
+           phyAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset
+           MemoryCopy(phyAddr, (&charVal) asInteger, 1)
+           offset = offset + 1
+           copiedSoFar = copiedSoFar + 1 
+           if charVal == '\n'
+              break
+           endIf
+           if offset == PAGE_SIZE -- cross page boundary 
+              virtPage = virtPage + 1
+              offset = 0
+              if  virtPage > pvirSpace.numberOfPages -1
+                 || !pvirSpace.IsValid(virtPage)
+                 || !pvirSpace.IsWritable(virtPage)
+                 return -1
+              endIf
+              isSet = false
+           endIf
+        endWhile
+        return copiedSoFar
+      endIf  --------------- end of reading from serial device
+      
+      ------------------ read from pipe -----------------------
+      if pProcess.fileDescriptor[fileDesc].kind == PIPE
+         pOpen = pProcess.fileDescriptor[fileDesc]
+         if pOpen.flags != O_READ
+            return -1
+        endIf
+        for i=0 to MAX_FILES_PER_PROCESS - 1
+            if pProcess.fileDescriptor[i] != null
+               && pProcess.fileDescriptor[i].kind == PIPE
+               && pProcess.fileDescriptor[i].flags == O_WRITE
+               break
+            endIf
+        endFor
+        if i == MAX_FILES_PER_PROCESS --all write end are closed
+           return 0xff
+        endIf
+        virtAddr = buffer asInteger
+        virtPage = virtAddr/PAGE_SIZE
+        offset = virtAddr % PAGE_SIZE
+        copiedSoFar = 0
+        while copiedSoFar < sizeInBytes
+          thisChunkSize = PAGE_SIZE - offset
+          if copiedSoFar + thisChunkSize > sizeInBytes
+             thisChunkSize = sizeInBytes - copiedSoFar
+          endIf
+          if thisChunkSize <=0
+              break
+          endIf
+          if virtPage < 0 
+             || virtPage > pvirSpace.numberOfPages -1
+             || !pvirSpace.IsValid(virtPage)
+             || !pvirSpace.IsWritable(virtPage)
+             return -1
+           endIf
+           pvirSpace.SetDirty(virtPage)
+           pvirSpace.SetReferenced(virtPage)
+
+           phyAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset
+           if pOpen.pipe.Read(phyAddr asPtrTo char, thisChunkSize) == -1
+              return -1
+           endIf
+           copiedSoFar = copiedSoFar + thisChunkSize 
+           virtPage = virtPage + 1
+           offset = 0
+        endWhile
+        return copiedSoFar   
+      endIf  ---------------------- end of read from pipe --------------
+      
+      if pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
          || (pProcess.fileDescriptor[fileDesc].flags & O_READ) != O_READ 
          return -1
       endIf
@@ -2474,7 +2602,11 @@ code Kernel
            thisChunkSize, sizeOfFile, retVal: int
            pvirSpace: ptr to AddrSpace = &currentThread.myProcess.addrSpace
            pProcess: ptr to ProcessControlBlock = currentThread.myProcess
-         
+           pOpen: ptr to OpenFile
+           charVal: char = '\n'
+           isSet: bool
+           phyAddr,i: int
+           
        -- print ("Handle_Sys_Write invoked!\n")
        -- print ("fileDesc = ")
        -- printInt(fileDesc) nl()
@@ -2488,7 +2620,98 @@ code Kernel
          || fileDesc < 0
          || pProcess.fileDescriptor[fileDesc] == null
          || sizeInBytes < 0
-         || pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
+         return -1
+      endIf
+      
+      ----------------for writting to serial device
+      if pProcess.fileDescriptor[fileDesc].kind == TERMINAL
+        virtAddr = buffer asInteger
+        virtPage = virtAddr/PAGE_SIZE
+        offset = virtAddr % PAGE_SIZE
+        copiedSoFar = 0
+        if virtPage < 0 
+           || virtPage > pvirSpace.numberOfPages -1
+           || !pvirSpace.IsValid(virtPage)
+           return -1
+        endIf
+        isSet = false
+        while copiedSoFar < sizeInBytes
+           if !isSet
+              pvirSpace.SetReferenced(virtPage)
+              isSet = true
+           endIf
+           phyAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset
+           MemoryCopy((&charVal) asInteger, phyAddr, 1)
+           offset = offset + 1
+           copiedSoFar = copiedSoFar + 1
+           if charVal == '\n'
+              offset = offset + 1
+              copiedSoFar = copiedSoFar + 1
+              serialDriver.PutChar('\r')
+           endIf
+           serialDriver.PutChar(charVal)
+           if charVal == '\n'
+              break
+           endIf
+           if offset == PAGE_SIZE -- cross page boundary 
+              virtPage = virtPage + 1
+              offset = 0
+              if  virtPage > pvirSpace.numberOfPages -1
+                 || !pvirSpace.IsValid(virtPage)
+                 return -1
+              endIf
+              isSet = false
+           endIf
+        endWhile
+        return copiedSoFar
+      endIf   ----------------------end writting to serial device
+                
+      ------------------ write to pipe -----------------------
+      if pProcess.fileDescriptor[fileDesc].kind == PIPE
+         pOpen = pProcess.fileDescriptor[fileDesc]
+         if pOpen.flags != O_WRITE
+            return -1
+        endIf
+        for i=0 to MAX_FILES_PER_PROCESS - 1
+            if pProcess.fileDescriptor[i] != null
+               && pProcess.fileDescriptor[i].kind == PIPE
+               && pProcess.fileDescriptor[i].flags == O_READ
+               break
+            endIf
+        endFor
+        if i == MAX_FILES_PER_PROCESS --all read end are closed
+           return -1
+        endIf
+        virtAddr = buffer asInteger
+        virtPage = virtAddr/PAGE_SIZE
+        offset = virtAddr % PAGE_SIZE
+        copiedSoFar = 0
+        while copiedSoFar < sizeInBytes
+          thisChunkSize = PAGE_SIZE - offset
+          if copiedSoFar + thisChunkSize > sizeInBytes
+             thisChunkSize = sizeInBytes - copiedSoFar
+          endIf
+          if thisChunkSize <=0
+              break
+          endIf
+          if virtPage < 0 
+             || virtPage > pvirSpace.numberOfPages -1
+             || !pvirSpace.IsValid(virtPage)
+             return -1
+           endIf
+           pvirSpace.SetReferenced(virtPage)
+           phyAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset
+           if pOpen.pipe.Write(phyAddr asPtrTo char, thisChunkSize) == -1
+              return -1
+           endIf
+           copiedSoFar = copiedSoFar + thisChunkSize 
+           virtPage = virtPage + 1
+           offset = 0
+        endWhile
+        return copiedSoFar   
+      endIf  ---------------------- end of read from pipe --------------
+      
+      if pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
          || (pProcess.fileDescriptor[fileDesc].flags & O_WRITE) != O_WRITE
          return -1
       endIf
@@ -2544,6 +2767,7 @@ code Kernel
       -- printInt(newCurrentPos) nl() nl()
       --if error occours the function returns -1
       -- for directory pos should be 0, otherwise fail
+      -- if fileDesc is terminal file, return -1
       fileManager.fileManagerLock.Lock()
       if fileDesc >= MAX_FILES_PER_PROCESS
          || fileDesc < 0
@@ -2553,6 +2777,8 @@ code Kernel
       pOpen = pProcess.fileDescriptor[fileDesc]
       if pOpen == null
          || (pOpen.kind == DIRECTORY && newCurrentPos != 0)
+         || pOpen.kind == TERMINAL
+         || pOpen.kind == PIPE
          || newCurrentPos < -1
          || newCurrentPos > pOpen.fcb.inode.fsize 
          fileManager.fileManagerLock.Unlock()
@@ -2566,8 +2792,141 @@ code Kernel
       fileManager.fileManagerLock.Unlock()
       return pOpen.currentPos
     endFunction
+-----------------------------  Handle_Sys_Dup  ---------------------------------
+  function  Handle_Sys_Dup (fd: int) returns int
+     --
+     -- The Dup() system call creates a copy of the file descriptor fd,
+     --  using the lowest-numbered unused descriptor for the new descriptor
+     --  and they refer to same Openfile
+     var pOpen: ptr to OpenFile
+         pProcess: ptr to ProcessControlBlock = currentThread.myProcess
+         i: int
+     if fd >= MAX_FILES_PER_PROCESS
+         || fd < 0
+         return -1
+     endIf
+     pOpen = pProcess.fileDescriptor[fd]
+     if pOpen == null
+         || (pOpen.kind != FILE)
+         return -1
+     endIf
+     for i=0 to MAX_FILES_PER_PROCESS - 1
+          if pProcess.fileDescriptor[i] == null
+              break
+          endIf
+      endFor
+      if i == MAX_FILES_PER_PROCESS
+         return -1
+      endIf
+      pProcess.fileDescriptor[i] = pOpen.NewReference()
+      return i
+  endFunction
+-----------------------------  Handle_Sys_Pipe  ---------------------------------
+  function  Handle_Sys_Pipe (fds: ptr to array[2] of int) returns int
+      var rOpen, wOpen: ptr to OpenFile
+          rPipe, wPipe: ptr to Pipe
+          i,rfd, wfd: int
+          pProcess: ptr to ProcessControlBlock = currentThread.myProcess
+          destAddr, virtAddr, virtPage, offset: int
+      if fds == null
+         return -1
+      endIf
+      -------------------- openfile for read
+      rOpen = fileManager.GetAnOpenFile(false)
+      if rOpen == null
+         return -1
+      endIf
+      -------------------- openfile for write
+      wOpen = fileManager.GetAnOpenFile(false)
+      if wOpen == null
+         fileManager.Close(rOpen)
+         return -1
+      endIf
+      ------------------- pipe for read
+      rPipe = fileManager.GetAnPipe()
+      if rPipe == null
+         fileManager.Close(rOpen)
+         fileManager.Close(wOpen)
+         return -1
+      endIf
+      if !rPipe.Open()
+         fileManager.Close(rOpen)
+         fileManager.Close(wOpen)
+         fileManager.ReturnPipe(rPipe)
+         return -1
+      endIf
+      rOpen.Init(PIPE, null, O_READ)
+      rOpen.pipe = rPipe
+      ---------------- pipe for write
+      wPipe = fileManager.GetAnPipe()
+      if wPipe == null
+         fileManager.Close(rOpen)
+         fileManager.Close(wOpen)
+         fileManager.ReturnPipe(rPipe)
+         return -1
+      endIf
+      if !wPipe.Open()
+         fileManager.Close(rOpen)
+         fileManager.Close(wOpen)
+         fileManager.ReturnPipe(rPipe)
+         fileManager.ReturnPipe(wPipe)
+         return -1
+      endIf      
+      wOpen.Init(PIPE, null, O_WRITE)
+      wOpen.pipe = wPipe
+      ------------get free fd indexs
+      rfd = -1
+      wfd = -1
+      for i=0 to MAX_FILES_PER_PROCESS - 1
+          if pProcess.fileDescriptor[i] == null
+              if rfd == -1
+                 rfd = i
+              else
+                 wfd = i
+                 break
+              endIf
+          endIf
+      endFor
+      if i == MAX_FILES_PER_PROCESS
+         fileManager.Close(rOpen)
+         fileManager.Close(wOpen)
+         fileManager.ReturnPipe(rPipe)
+         fileManager.ReturnPipe(wPipe)      
+         return -1
+      endIf
+      pProcess.fileDescriptor[rfd] = rOpen
+      pProcess.fileDescriptor[wfd] = wOpen
+      virtAddr = fds asInteger
+      virtPage = virtAddr/PAGE_SIZE
+      offset = virtAddr % PAGE_SIZE
+      destAddr = pProcess.addrSpace.ExtractFrameAddr(virtPage) + offset
+      * (destAddr asPtrTo int) = 2
+      * ((destAddr+4) asPtrTo int) = rfd
+      * ((destAddr+8) asPtrTo int) = wfd
+      return 0
+  endFunction
+-----------------------------  Handle_Sys_Link  ---------------------------------
 
------------------------------  Handle_Sys_Close  ---------------------------------
+  function  Handle_Sys_Link (oldname, newname: String) returns int
+
+     return -1
+  endFunction
+-----------------------------  Handle_Sys_Unlink  ---------------------------------
+
+  function Handle_Sys_Unlink (filename: String) returns int
+     return -1
+  endFunction
+  -----------------------------  Handle_Sys_Mkdir  ---------------------------------
+
+  function Handle_Sys_Mkdir (filename: String) returns int
+     return -1
+  endFunction
+  -----------------------------  Handle_Sys_Rmdir  ---------------------------------
+
+  function Handle_Sys_Rmdir (filename: String) returns int
+     return -1
+  endFunction
+ -----------------------------  Handle_Sys_Close  ---------------------------------
 
   function Handle_Sys_Close (fileDesc: int)
       --
@@ -2583,7 +2942,12 @@ code Kernel
          ||pProcess.fileDescriptor[fileDesc] == null
          return
       endIf
-      fileManager.Close(pProcess.fileDescriptor[fileDesc])
+      if pProcess.fileDescriptor[fileDesc].kind == PIPE
+         pProcess.fileDescriptor[fileDesc].pipe.Close()
+      endIf
+      if pProcess.fileDescriptor[fileDesc].kind != TERMINAL
+         fileManager.Close(pProcess.fileDescriptor[fileDesc])
+      endIf
       pProcess.fileDescriptor[fileDesc] = null
     endFunction
 
@@ -2814,6 +3178,15 @@ code Kernel
           serialTerminalFile = new OpenFile
           serialTerminalFile.kind = TERMINAL
 
+          -- Initialize the Pipe stuff
+          pipeFreeList = new List [Pipe]
+          pipeTable = new array of Pipe
+                { MAX_NUMBER_OF_PIPES of new Pipe }
+          for i = 0 to MAX_NUMBER_OF_PIPES-1
+            pipeTable[i].Init()
+            pipeFreeList.AddToEnd (&pipeTable[i])
+          endFor
+          
          endMethod
 
       ----------  FileManager . Print  ----------
@@ -2946,7 +3319,30 @@ code Kernel
 	  return open
 
         endMethod
+        
+      ----------  FileMangger . GetAnPipe --------
+      method GetAnPipe () returns ptr to Pipe
+        -- get a free pipe
+        -- don't block
+        var pipe: ptr to Pipe
+          fileManagerLock.Lock()
+          if pipeFreeList.IsEmpty()
+	     fileManagerLock.Unlock()
+	     return null
+	  endIf
+          pipe = pipeFreeList.Remove ()
+	  fileManagerLock.Unlock ()
+	  return pipe
 
+        endMethod
+     ----------  FileMangger . ReturnPipe --------
+      method ReturnPipe (pPipe: ptr to Pipe)
+        -- free a pipe
+          fileManagerLock.Lock()
+          pipeFreeList.AddToEnd (pPipe)
+	  fileManagerLock.Unlock ()
+        endMethod
+        
       ----------  FileMangger . LookupFCB --------
       method LookupFCB (inodeNum: int) returns
       	      ptr to FileControlBlock
@@ -3001,6 +3397,7 @@ code Kernel
           -- Safe to unlock now, inode read will provide its own synch 
           fileManagerLock.Unlock()
 
+    endFunction
           -- Check for correctness of new fcb returned 
           if fcb.relativeSectorInBuffer >= 0 || fcb.bufferIsDirty
             FatalError (
@@ -3030,19 +3427,22 @@ code Kernel
             return
           endIf
           fileManagerLock.Lock()
-          open.fcb.Flush()
-          open.numberOfUsers = open.numberOfUsers - 1
-          if open.numberOfUsers <= 0
-            fcb = open.fcb
+         if open.fcb != null
+             open.fcb.Flush()
+	 endIf
+         open.numberOfUsers = open.numberOfUsers - 1
+         if open.numberOfUsers <= 0
+            if open.fcb != null
+               fcb = open.fcb
+            endIf
             openFileFreeList.AddToEnd (open)
             anOpenFileBecameFree.Signal (& fileManagerLock)
-            fcb.numberOfUsers = fcb.numberOfUsers -1
-            if fcb.numberOfUsers <= 0
-               fcb.Release(&fileManagerLock)
-            endIf
-          endIf
-          fileManagerLock.Unlock()
-        endMethod
+           if open.fcb != null
+              fcb.Release(&fileManagerLock)
+           endIf
+        endIf
+        fileManagerLock.Unlock()
+      endMethod
 
        ----------  FileManager . SynchRead  ----------
 
@@ -3210,13 +3610,13 @@ code Kernel
             p: ptr to int
 
 	  -- Get a frame for inode manipulations and initialize the lock
-	  inodeBuffer = frameManager.GetAFrame ()
+	  inodeBuffer = frameManager.GetAFrame (true)
 	  inodeBuffSec = -1
  	  fsLock = new Mutex
 	  fsLock.Init ()
 
           -- Read in sector 0 from the disk.  This is the super bloc,
- 	  superBlock = frameManager.GetAFrame ()
+ 	  superBlock = frameManager.GetAFrame (true)
           diskDriver.SynchReadSector (0,    -- sector to read
                                       1,    -- number of sectors to read
                                       superBlock)
@@ -3635,8 +4035,42 @@ code Kernel
       --------------- ToyFs . MakeDir  ----------------
 
     method MakeDir (dirname: String) returns int
-         FatalError ("ToyFs . MakeDir Not Implemented.")
+      var lastElStart: int
+           curDir: ptr to OpenFile
+           workdir: ptr to OpenFile = currentThread.myProcess.workingDir
+           inumber, len: int
+           name: array [ MAX_STRING_SIZE ] of char
+           thisFCB: ptr to FileControlBlock
+           paddr: ptr to AddrSpace = currentThread.myProcess.addrSpace
+      
+      len = paddr.GetStringFromVirtual(&name,dirname asInteger,MAX_STRING_SIZE)
+      if len < 0
          return -1
+      endIf
+      inumber = self.NameToInodeNum(name,workdir)
+      if inumber == -1 -- old file not exist
+         return -1
+      endIf
+      curDir = fileSystem.OpenLastDir(name, workdir, &lastElStart)
+      if curDir == null
+         return -1
+      endIf
+      if (curDir.flags & O_WRITE) != O_WRITE
+         return -1
+      endIf
+      *((&lastElName) asPtrTo int) = NewName arraySize - lastElStart
+      for ix = 0 to NewName arraySize - lastElStart -1
+          lastElName[ix] = NewName[lastElStart+ix]
+      endFor
+      if !curDir.AddEntry(inumber, &lastElName)
+          return -1
+      endIf
+      fileManager.Close(curDir)
+      thisFCB = fileManager.GetFCB(inumber)
+      if thisFCB == null
+         return -1
+      endIf      
+      return -1
       endMethod
 
       --------------- ToyFs . RemoveDir  ----------------
@@ -3649,9 +4083,52 @@ code Kernel
       --------------- ToyFs . Link  ----------------
 
     method Link (oldname, newname: String) returns int
-         FatalError ("ToyFs . MakeDir Not Implemented.")
+      var lastElStart: int
+           curDir: ptr to OpenFile
+           workdir: ptr to OpenFile = currentThread.myProcess.workingDir
+           inumber, ix, len: int
+           OldName,NewName, lastElName: array [ MAX_STRING_SIZE ] of char
+           thisFCB: ptr to FileControlBlock
+           paddr: ptr to AddrSpace = currentThread.myProcess.addrSpace
+      
+      len = paddr.GetStringFromVirtual(&OldName,oldname asInteger,MAX_STRING_SIZE)
+      if len < 0
          return -1
-     endMethod
+      endIf
+      len = paddr.GetStringFromVirtual(&NewName,newname asInteger,MAX_STRING_SIZE)
+      if len < 0
+         return -1
+      endIf
+      inumber = self.NameToInodeNum(OldName,workdir)
+      if inumber == -1 -- old file not exist
+         return -1
+      endIf
+      curDir = fileSystem.OpenLastDir(NewName,workdir, &lastElStart)
+      if curDir == null
+         return -1
+      endIf
+      if (curDir.flags & O_WRITE) != O_WRITE
+         return -1
+      endIf
+      *((&lastElName) asPtrTo int) = NewName arraySize - lastElStart
+      for ix = 0 to NewName arraySize - lastElStart -1
+          lastElName[ix] = NewName[lastElStart+ix]
+      endFor
+      if !curDir.AddEntry(inumber, &lastElName)
+          return -1
+      endIf
+      fileManager.Close(curDir)
+      thisFCB = fileManager.GetFCB(inumber)
+      if thisFCB == null
+         return -1
+      endIf
+      thisFCB.inode.nlinks = thisFCB.inode.nlinks + 1
+      thisFCB.inode.WriteInode()
+      fileManager.fileManagerLock.Lock()
+      thisFCB.Release(&fileManager.fileManagerLock)
+      fileManager.fileManagerLock.Unlock()
+      return 1
+   endMethod
 
 
       --------------- ToyFs .Unlink   ----------------
@@ -3897,7 +4374,7 @@ code Kernel
       method GetIndirect ()
 	
 	-- read the indirect block
-	indSec = frameManager.GetAFrame() 
+	indSec = frameManager.GetAFrame(true) 
 	diskDriver.SynchReadSector (indir1 + fileSystem.dataSecOffset, 1, indSec)
 
 	endMethod
@@ -3931,6 +4408,10 @@ code Kernel
       ----------- InodeData . SetMode () -------------
 
       method SetMode ( newMode: int )
+        --
+        -- if TYPE and MODE both set, replace old mode with them
+        -- if TYPE is zero (not set) then only replace MODE part of old mode
+        -- if TYPE isn't zero and MODE is zero then set TYPE
         var types, rwx: int
          if mode == newMode
             return
@@ -3940,9 +4421,8 @@ code Kernel
          if types == 0
             mode = mode & 0xf0
             mode = mode | rwx
-        else
-          if types != 0
-             && rwx == 0
+        else  -- types != 0
+          if rwx == 0
             mode = mode & 0x0f
             mode = mode | types
           else
@@ -3966,7 +4446,7 @@ code Kernel
       --
       method Init ()
           numberOfUsers = 0
-          bufferPtr = frameManager.GetAFrame ()
+          bufferPtr = frameManager.GetAFrame (true)
           relativeSectorInBuffer = -1
           bufferIsDirty = false
 	  inode = new InodeData
@@ -4144,7 +4624,7 @@ code Kernel
         -- The given "addrSpace" is assumed to be empty; this method will
         -- allocate new frames and initialize the page table.
         --
-        -- If all is okay, this method returns the initial PC, which will be
+        -- If all is okay, this method returns the initial PC, which will berOpen
         -- the address of the first word of the first text page.
         --
         -- If any problems arise, this method returns -1.
@@ -4473,8 +4953,258 @@ code Kernel
 	   fcb.Flush()
            return true
 	endMethod
+     -- Lookup must have been the last operation and the ent
+     -- should be the value returned from a successfult Lookup
+   
+     method RemoveEntry (filename: String, ent: ptr to dirEntry) returns bool
+        var 
+	    offset: int
+	    entSz: int
+	    cpySz: int
+
+	   -- Sanity check
+           if kind != DIRECTORY
+	      FatalError ("RemoveEntry on a non-Directory file.")
+	   endIf
+
+	   -- print ("OpenFile:RemoveEntry -> ") print(filename) nl()
+	   if (StrCmp(filename,".") == 0) ||  (StrCmp(filename,"..") == 0)
+	      return false
+	   endIf
+
+	   fileSystem.fsLock.Lock()
+	   offset = (ent asInteger) - fcb.bufferPtr
+	   if offset < 0 || offset >= PAGE_SIZE
+	       fileSystem.fsLock.Unlock()
+	       print ("RemoveEntry Bug!\n")
+	       return false
+	   endIf
+
+	   -- Update Current pointer to location of entry
+	   entSz =  entSize(ent.name arraySize)
+	   currentPos = currentPos - entSz
+	   
+	   -- calculate how much to move
+	   if fcb.inode.fsize - currentPos < PAGE_SIZE - offset
+	      cpySz = fcb.inode.fsize - currentPos - entSz
+	   else
+	      cpySz = PAGE_SIZE - offset
+	   endIf
+
+	   --printIntVar("offset", offset) 
+	   --printIntVar ("currentPos", currentPos) 
+	   --printIntVar ("cpySz", cpySz)
+
+	   MemoryCopy (fcb.bufferPtr+offset, fcb.bufferPtr+offset+entSz, cpySz)
+	   fcb.bufferIsDirty = true
+	   if fcb.inode.fsize - currentPos < PAGE_SIZE - offset
+	      fcb.inode.fsize = fcb.inode.fsize - entSz
+	      fcb.inode.dirty = true
+	      fileSystem.fsLock.Unlock()
+	      fcb.inode.WriteInode()
+	   else
+      	      fileSystem.fsLock.Unlock()
+	   endIf
+
+	   -- Delete the last block(s)?  <Needs to be implemented>
+
+           return true
+        endMethod
 
   endBehavior
+   -------------------------- SerialDriver --------------------------------
+  behavior SerialDriver
+  
+  method Init ()
+    serialLock = new Mutex
+    serialLock.Init()
+    getBufferSize = 0
+    getBufferNextIn = 0
+    getBufferNextOut = 0
+    getCharacterAvail = new Condition
+    getCharacterAvail.Init()
+    getBuffer = new array of char {SERIAL_GET_BUFFER_SIZE of ' '}
+    putBufferSize = 0
+    putBufferNextIn = 0
+    putBufferNextOut = 0
+    putBufferSem = new Semaphore
+    putBufferSem.Init(0)
+    putBuffer = new array of char {SERIAL_PUT_BUFFER_SIZE of ' '}
+    serial_status_word_address = SERIAL_STATUS_WORD_ADDRESS asPtrTo int
+    serial_data_word_address = SERIAL_DATA_WORD_ADDRESS asPtrTo int
+    serialNeedsAttention = new Semaphore
+    serialNeedsAttention.Init(0) --?
+    serialHandlerThread = new Thread
+    serialHandlerThread.Init("Serial Handler")
+    serialHandlerThread.Fork(serialHandlerFunction, 0)
+    initialized = true  -- serialNeedsAttention initialized
+  endMethod
 
- 
+  --------------------------- Serial.PutChar ---------------------------------
+  method PutChar (value: char)
+     --
+     -- The putBuffer contains all the characters that are waiting to be printed 
+     --
+     -- while avoid cause error when other thread sneak in after completing Down()
+     while putBufferSize == SERIAL_PUT_BUFFER_SIZE-1 
+        putBufferSem.Down()
+     endWhile
+     --print("**")printChar(value) print("**")
+     serialLock.Lock()
+     putBuffer[putBufferNextIn] = value
+     putBufferNextIn = (putBufferNextIn + 1) % SERIAL_PUT_BUFFER_SIZE
+     putBufferSize = putBufferSize + 1
+     serialLock.Unlock()
+     serialNeedsAttention.Up()
+  endMethod
+  --------------------------- Serial.GetChar ---------------------------------
+  method GetChar () returns char
+     --
+     -- The getBuffer contains all the characters that have been typed but 
+     --  not yetrequested by a user program
+     --
+     var value: char
+     serialLock.Lock()
+     while getBufferSize == 0 --getbuffer is empty
+        getCharacterAvail.Wait(&serialLock)
+     endWhile
+     value = getBuffer[getBufferNextOut]
+     getBufferNextOut = (getBufferNextOut + 1) % SERIAL_GET_BUFFER_SIZE
+     getBufferSize = getBufferSize - 1
+     serialLock.Unlock()
+     return value
+  endMethod
+  --------------------------- Serial.SerialHandler --------------------------------
+  method SerialHandler ()
+     var inChar, outChar: char
+     while true
+       serialNeedsAttention.Down()
+      -- printHex(*serial_status_word_address) nl()
+       if ((*serial_status_word_address) & SERIAL_CHARACTER_AVAILABLE_BIT) 
+              == SERIAL_CHARACTER_AVAILABLE_BIT
+           serialLock.Lock()
+           MemoryCopy((&inChar) asInteger, (serial_data_word_address asInteger)+3, 1)
+           if getBufferSize == SERIAL_GET_BUFFER_SIZE-1
+              print ("\nSerial input buffer overrun - character '")
+              printChar (inChar )
+              print ("' was ignored\n")
+           else
+              getBuffer[getBufferNextIn] = inChar
+              getBufferNextIn = (getBufferNextIn + 1) % SERIAL_GET_BUFFER_SIZE
+              getBufferSize = getBufferSize + 1
+              getCharacterAvail.Signal(&serialLock)
+           endIf
+           serialLock.Unlock()
+           continue
+       endIf
+       if ((*serial_status_word_address) & SERIAL_OUTPUT_READY_BIT) 
+              == SERIAL_OUTPUT_READY_BIT
+           serialLock.Lock()
+           if putBufferSize != 0
+             outChar = putBuffer[putBufferNextOut]
+             putBufferNextOut = (putBufferNextOut + 1) % SERIAL_PUT_BUFFER_SIZE
+             putBufferSize = putBufferSize - 1
+             MemoryCopy((serial_data_word_address asInteger)+3, 
+                                                 (&outChar) asInteger, 1) 
+             putBufferSem.Up()
+           endIf
+           serialLock.Unlock()
+      endIf
+    endWhile
+  endMethod
+ endBehavior
+  -------------------------- serialThread Handler -------------------------------
+  function serialHandlerFunction()
+      serialDriver.SerialHandler()
+  endFunction
+  
+  ---------------------------- class Pipe ---------------------------------------
+  behavior Pipe
+  
+  ----------------------------- Pipe.Init ----------------------------------
+    method Init() 
+      pipeMutex = new Mutex
+      pipeMutex.Init()
+      charsInPipe = 0
+      bufferFrame = -1
+      readWait = true
+      writeWait = true
+      readQueue = new Condition
+      readQueue.Init()
+      writeQueue = new Condition
+      writeQueue.Init()
+    endMethod
+  ----------------------------- Pipe.Open ----------------------------------
+    method Open() returns bool
+      bufferFrame = frameManager.GetAFrame(false)
+      if bufferFrame == -1
+         return false
+      endIf
+      head = bufferFrame
+      tail = bufferFrame
+      return true
+    endMethod
+  ----------------------------- Pipe.Read ----------------------------------
+    method Read (buffer:ptr to char, sizeInBytes: int) returns int
+       if buffer == null
+          || sizeInBytes <= 0
+          || sizeInBytes > charsInPipe
+          return -1
+       endIf       
+       pipeMutex.Lock()
+       if charsInPipe == 0 && !readWait
+          pipeMutex.Unlock()
+          return -1
+       endIf
+       while charsInPipe == 0--buffer is empty
+          readQueue.Wait(&pipeMutex)
+       endWhile
+       MemoryCopy(buffer asInteger, tail, sizeInBytes)
+       tail = (tail + sizeInBytes) % PAGE_SIZE
+       charsInPipe = charsInPipe - sizeInBytes
+       writeQueue.Broadcast(&pipeMutex)
+       pipeMutex.Unlock()
+       return 0
+    endMethod
+  ----------------------------- Pipe.Write ----------------------------------
+    method Write (buffer: ptr to char, sizeInBytes: int) returns int
+       var chunkSize, copied: int
+           pBuffer: int
+       if buffer == null
+          || sizeInBytes <= 0
+       --   || sizeInBytes > PAGE_SIZE - charsInPipe
+          return -1
+       endIf
+       pBuffer = buffer asInteger
+       copied = 0
+       chunkSize = sizeInBytes - copied
+       pipeMutex.Lock()
+       if charsInPipe == PAGE_SIZE && !writeWait
+          pipeMutex.Unlock()
+          return -1
+       endIf
+       while copied < sizeInBytes
+          while charsInPipe == PAGE_SIZE --buffer is full
+             writeQueue.Wait(&pipeMutex)
+          endWhile
+          if chunkSize > PAGE_SIZE - charsInPipe
+             chunkSize = PAGE_SIZE - charsInPipe
+          endIf
+          MemoryCopy(head, pBuffer, chunkSize)
+          pBuffer = pBuffer + chunkSize
+          head = (head + sizeInBytes) % PAGE_SIZE
+          charsInPipe = charsInPipe + sizeInBytes
+          copied = copied + chunkSize
+          chunkSize = sizeInBytes - copied
+      endWhile
+      readQueue.Broadcast(&pipeMutex)
+      pipeMutex.Unlock()
+       return copied
+    endMethod
+  ----------------------------- Pipe.Close ----------------------------------
+    method Close()
+      frameManager.PutAFrame(bufferFrame)
+      bufferFrame = -1
+    endMethod
+  endBehavior
 endCode
