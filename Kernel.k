@@ -4011,10 +4011,12 @@ code Kernel
           return null
        endIf
        if !dir.AddEntry(inum, filename)
+          self.FreeInode(inumber)
           return null
        endIf
       fcb = fileManager.GetFCB(inum)
       if fcb == null
+         self.FreeInode(inumber)
          return null
       endIf
       fcb.inode.nlinks = 1 -- number of directory entries, file is 1
@@ -4042,15 +4044,14 @@ code Kernel
            name: array [ MAX_STRING_SIZE ] of char
            thisFCB: ptr to FileControlBlock
            paddr: ptr to AddrSpace = currentThread.myProcess.addrSpace
+           parentInumber: int
+           pOpen: ptr to OpenFile
       
       len = paddr.GetStringFromVirtual(&name,dirname asInteger,MAX_STRING_SIZE)
       if len < 0
          return -1
       endIf
-      inumber = self.NameToInodeNum(name,workdir)
-      if inumber == -1 -- old file not exist
-         return -1
-      endIf
+     
       curDir = fileSystem.OpenLastDir(name, workdir, &lastElStart)
       if curDir == null
          return -1
@@ -4062,14 +4063,59 @@ code Kernel
       for ix = 0 to NewName arraySize - lastElStart -1
           lastElName[ix] = NewName[lastElStart+ix]
       endFor
+      inumber = self.AllocInode()
+      if inum == -1
+         return null
+      endIf
       if !curDir.AddEntry(inumber, &lastElName)
+          self.FreeInode(inumber)
           return -1
       endIf
-      fileManager.Close(curDir)
+      curDir.fcb.inode.nlinks = curDir.fcb.inode.nlinks + 1
+      parentInumber = curDir.fcb.inode.number
+     -- fileManager.Close(curDir)
       thisFCB = fileManager.GetFCB(inumber)
       if thisFCB == null
+         self.FreeInode(inumber)
+         fileManager.Close(curDir)
          return -1
-      endIf      
+      endIf
+      -- adding entries . and .. to new dir
+      if len + 3 > MAX_STRING_SIZE -- not enough space to add . and ..
+          self.FreeInode(inumber)
+          fileManager.Close(curDir)
+          return -1
+       endIf
+      name[len] = '\'
+       -- get a OpenFile for new directory
+      pOpen = fileManager.GetAnOpenFile(true)
+      if pOpen == null
+         self.FreeInode(inumber)
+         fileManager.Close(curDir)
+         fileManager.fileManagerLock.Lock()
+         thisFCB.Release(&fileManager.fileManagerLock)
+         fileManager.fileManagerLock.Unlock()
+         return -1
+      endIf
+      fileManager.fileManagerLock.Lock()
+      pOpen.Init(DIRECTORY, thisFCB, O_READ|O_WRITE)
+      fileManager.fileManagerLock.Unlock()
+      -- add . link to itself
+      name[len+1] = '.'
+      pOpen.AddEntry(inumber, &name) 
+      thisFCB.inode.nlinks = 1
+      -- add .. link to parent directory
+      name[len+2] = '.'
+      pOpen.AddEntry(parentInumber, &name)
+      thisFCB.inode.nlinks = 2  ---------------------------------should be 3 ?
+      curDir.fcb.inode.nlinks = curDir.fcb.inode.nlinks + 1
+      curDir.fcb.inode.WriteInode()
+      fileManager.Close(curDir)
+      fileManager.Close(pOPen)
+      thisFCB.inode.WriteInode()
+      fileManager.fileManagerLock.Lock()
+      thisFCB.Release(&fileManager.fileManagerLock)
+      fileManager.fileManagerLock.Unlock()
       return -1
       endMethod
 
@@ -4117,6 +4163,8 @@ code Kernel
       if !curDir.AddEntry(inumber, &lastElName)
           return -1
       endIf
+      curDir.fcb.inode.nlinks = curDir.fcb.inode.nlinks + 1
+      curDir.fcb.inode.Write()
       fileManager.Close(curDir)
       thisFCB = fileManager.GetFCB(inumber)
       if thisFCB == null
