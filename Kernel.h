@@ -29,7 +29,7 @@ header Kernel
     
     MAX_NUMBER_OF_PROCESSES = 20
     MAX_STRING_SIZE = 80
-    MAX_PAGES_PER_VIRT_SPACE = 25
+    MAX_PAGES_PER_VIRT_SPACE = 40
     MAX_FILES_PER_PROCESS = 10
     MAX_NUMBER_OF_FILE_CONTROL_BLOCKS = 40
     MAX_NUMBER_OF_OPEN_FILES = 40
@@ -580,12 +580,14 @@ const
       writeWait: bool
       readQueue: Condition
       writeQueue: Condition
+      readClosed: bool
+      writeClosed: bool
     methods
       Init()
       Open () returns bool
       Read (buffer:ptr to char, sizeInBytes: int) returns int
       Write (buffer: ptr to char, sizeInBytes: int) returns int
-      Close()
+      Close(flag: int) -- flag: O_READ , O_WRITE
   endClass
   
 endHeader

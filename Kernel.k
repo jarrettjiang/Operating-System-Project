@@ -2432,7 +2432,7 @@ code Kernel
            pOpen: ptr to OpenFile
            charVal: char
            isSet: bool
-           phyAddr, i: int
+           phyAddr: int
          
     --  print ("Handle_Sys_Read invoked!\n")
     -- print ("fileDesc = ")
@@ -2463,6 +2463,24 @@ code Kernel
            return -1
         endIf
         isSet = false
+        -- First loop to check error
+        while copiedSoFar < sizeInBytes
+           offset = offset + 1
+           copiedSoFar = copiedSoFar + 1            
+           if offset == PAGE_SIZE -- cross page boundary 
+              virtPage = virtPage + 1
+              offset = 0
+              if  virtPage > pvirSpace.numberOfPages -1
+                 || !pvirSpace.IsValid(virtPage)
+                 || !pvirSpace.IsWritable(virtPage)
+                 return -1
+              endIf
+           endIf
+        endWhile
+        virtPage = virtAddr/PAGE_SIZE
+        offset = virtAddr % PAGE_SIZE
+        copiedSoFar = 0
+        -- Second loop do actual reading
         while copiedSoFar < sizeInBytes
            charVal = serialDriver.GetChar()
            if charVal == 0x04
@@ -2503,16 +2521,15 @@ code Kernel
          if pOpen.flags != O_READ
             return -1
         endIf
-        for i=0 to MAX_FILES_PER_PROCESS - 1
-            if pProcess.fileDescriptor[i] != null
-               && pProcess.fileDescriptor[i].kind == PIPE
-               && pProcess.fileDescriptor[i].flags == O_WRITE
-               break
-            endIf
-        endFor
-        if i == MAX_FILES_PER_PROCESS --all write end are closed
+         if pOpen.pipe == null
+           return -1
+        endIf
+        pOpen.pipe.pipeMutex.Lock()
+        if pOpen.pipe.writeClosed == true --all write end are closed
+           pOpen.pipe.pipeMutex.Unlock()
            return 0xff
         endIf
+        pOpen.pipe.pipeMutex.Unlock()
         virtAddr = buffer asInteger
         virtPage = virtAddr/PAGE_SIZE
         offset = virtAddr % PAGE_SIZE
@@ -2533,8 +2550,7 @@ code Kernel
            endIf
            pvirSpace.SetDirty(virtPage)
            pvirSpace.SetReferenced(virtPage)
-
-           phyAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset
+           phyAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset          
            if pOpen.pipe.Read(phyAddr asPtrTo char, thisChunkSize) == -1
               return -1
            endIf
@@ -2605,7 +2621,7 @@ code Kernel
            pOpen: ptr to OpenFile
            charVal: char = '\n'
            isSet: bool
-           phyAddr,i: int
+           phyAddr: int
            
        -- print ("Handle_Sys_Write invoked!\n")
        -- print ("fileDesc = ")
@@ -2635,6 +2651,23 @@ code Kernel
            return -1
         endIf
         isSet = false
+        -- First loop check error
+        while copiedSoFar < sizeInBytes
+           offset = offset + 1
+           copiedSoFar = copiedSoFar + 1         
+           if offset == PAGE_SIZE -- cross page boundary 
+              virtPage = virtPage + 1
+              offset = 0
+              if  virtPage > pvirSpace.numberOfPages -1
+                 || !pvirSpace.IsValid(virtPage)
+                 return -1
+              endIf
+           endIf
+        endWhile
+        virtPage = virtAddr/PAGE_SIZE
+        offset = virtAddr % PAGE_SIZE
+        copiedSoFar = 0
+        -- Second loop do actual writting
         while copiedSoFar < sizeInBytes
            if !isSet
               pvirSpace.SetReferenced(virtPage)
@@ -2644,13 +2677,14 @@ code Kernel
            MemoryCopy((&charVal) asInteger, phyAddr, 1)
            offset = offset + 1
            copiedSoFar = copiedSoFar + 1
-           if charVal == '\n'
-              offset = offset + 1
-              copiedSoFar = copiedSoFar + 1
-              serialDriver.PutChar('\r')
-           endIf
+          -- if charVal == '\n'
+          --    offset = offset + 1
+          --    copiedSoFar = copiedSoFar + 1
+          --    serialDriver.PutChar('\r')
+          -- endIf
            serialDriver.PutChar(charVal)
            if charVal == '\n'
+              serialDriver.PutChar('\r')
               break
            endIf
            if offset == PAGE_SIZE -- cross page boundary 
@@ -2672,16 +2706,15 @@ code Kernel
          if pOpen.flags != O_WRITE
             return -1
         endIf
-        for i=0 to MAX_FILES_PER_PROCESS - 1
-            if pProcess.fileDescriptor[i] != null
-               && pProcess.fileDescriptor[i].kind == PIPE
-               && pProcess.fileDescriptor[i].flags == O_READ
-               break
-            endIf
-        endFor
-        if i == MAX_FILES_PER_PROCESS --all read end are closed
+        if pOpen.pipe == null
            return -1
         endIf
+        pOpen.pipe.pipeMutex.Lock()
+        if pOpen.pipe.readClosed == true --all read end are closed
+           pOpen.pipe.pipeMutex.Unlock()
+           return -1
+        endIf
+        pOpen.pipe.pipeMutex.Unlock()
         virtAddr = buffer asInteger
         virtPage = virtAddr/PAGE_SIZE
         offset = virtAddr % PAGE_SIZE
@@ -2709,7 +2742,7 @@ code Kernel
            offset = 0
         endWhile
         return copiedSoFar   
-      endIf  ---------------------- end of read from pipe --------------
+      endIf  ---------------------- end of write to pipe --------------
       
       if pProcess.fileDescriptor[fileDesc].kind == DIRECTORY
          || (pProcess.fileDescriptor[fileDesc].flags & O_WRITE) != O_WRITE
@@ -2807,7 +2840,7 @@ code Kernel
      endIf
      pOpen = pProcess.fileDescriptor[fd]
      if pOpen == null
-         || (pOpen.kind != FILE)
+         || (pOpen.kind == DIRECTORY)
          return -1
      endIf
      for i=0 to MAX_FILES_PER_PROCESS - 1
@@ -2824,7 +2857,7 @@ code Kernel
 -----------------------------  Handle_Sys_Pipe  ---------------------------------
   function  Handle_Sys_Pipe (fds: ptr to array[2] of int) returns int
       var rOpen, wOpen: ptr to OpenFile
-          rPipe, wPipe: ptr to Pipe
+          rwPipe: ptr to Pipe
           i,rfd, wfd: int
           pProcess: ptr to ProcessControlBlock = currentThread.myProcess
           destAddr, virtAddr, virtPage, offset: int
@@ -2842,38 +2875,24 @@ code Kernel
          fileManager.Close(rOpen)
          return -1
       endIf
-      ------------------- pipe for read
-      rPipe = fileManager.GetAnPipe()
-      if rPipe == null
+      ------------------- pipe for read and write
+      rwPipe = fileManager.GetAnPipe()
+      if rwPipe == null
          fileManager.Close(rOpen)
          fileManager.Close(wOpen)
          return -1
       endIf
-      if !rPipe.Open()
+      if !rwPipe.Open()
          fileManager.Close(rOpen)
          fileManager.Close(wOpen)
-         fileManager.ReturnPipe(rPipe)
+         fileManager.ReturnPipe(rwPipe)
          return -1
       endIf
       rOpen.Init(PIPE, null, O_READ)
-      rOpen.pipe = rPipe
-      ---------------- pipe for write
-      wPipe = fileManager.GetAnPipe()
-      if wPipe == null
-         fileManager.Close(rOpen)
-         fileManager.Close(wOpen)
-         fileManager.ReturnPipe(rPipe)
-         return -1
-      endIf
-      if !wPipe.Open()
-         fileManager.Close(rOpen)
-         fileManager.Close(wOpen)
-         fileManager.ReturnPipe(rPipe)
-         fileManager.ReturnPipe(wPipe)
-         return -1
-      endIf      
+      rOpen.pipe = rwPipe
+      
       wOpen.Init(PIPE, null, O_WRITE)
-      wOpen.pipe = wPipe
+      wOpen.pipe = rwPipe
       ------------get free fd indexs
       rfd = -1
       wfd = -1
@@ -2890,8 +2909,7 @@ code Kernel
       if i == MAX_FILES_PER_PROCESS
          fileManager.Close(rOpen)
          fileManager.Close(wOpen)
-         fileManager.ReturnPipe(rPipe)
-         fileManager.ReturnPipe(wPipe)      
+         fileManager.ReturnPipe(rwPipe)      
          return -1
       endIf
       pProcess.fileDescriptor[rfd] = rOpen
@@ -2934,6 +2952,7 @@ code Kernel
       -- which is assumed to be open. It closes the file.
       --
       var pProcess: ptr to ProcessControlBlock = currentThread.myProcess
+          pOpen: ptr to OpenFile
       --print ("Handle_Sys_Close invoked!\n")
       --print("fileDesc = ")
       -- printInt(fileDesc) nl() nl()
@@ -2942,11 +2961,9 @@ code Kernel
          ||pProcess.fileDescriptor[fileDesc] == null
          return
       endIf
-      if pProcess.fileDescriptor[fileDesc].kind == PIPE
-         pProcess.fileDescriptor[fileDesc].pipe.Close()
-      endIf
-      if pProcess.fileDescriptor[fileDesc].kind != TERMINAL
-         fileManager.Close(pProcess.fileDescriptor[fileDesc])
+      pOpen = pProcess.fileDescriptor[fileDesc]
+      if pOpen.kind != TERMINAL
+         fileManager.Close(pOpen)
       endIf
       pProcess.fileDescriptor[fileDesc] = null
     endFunction
@@ -3397,7 +3414,6 @@ code Kernel
           -- Safe to unlock now, inode read will provide its own synch 
           fileManagerLock.Unlock()
 
-    endFunction
           -- Check for correctness of new fcb returned 
           if fcb.relativeSectorInBuffer >= 0 || fcb.bufferIsDirty
             FatalError (
@@ -3422,7 +3438,6 @@ code Kernel
       -- FCB is freed.
       --
       method Close (open: ptr to OpenFile)
-          var fcb: ptr to FileControlBlock
           if open == & serialTerminalFile
             return
           endIf
@@ -3432,13 +3447,16 @@ code Kernel
 	 endIf
          open.numberOfUsers = open.numberOfUsers - 1
          if open.numberOfUsers <= 0
-            if open.fcb != null
-               fcb = open.fcb
-            endIf
+            if open.kind == PIPE
+               open.pipe.Close(open.flags)
+               if open.pipe.writeClosed && open.pipe.readClosed
+                   pipeFreeList.AddToEnd (open.pipe)
+               endIf
+            endIf               
             openFileFreeList.AddToEnd (open)
             anOpenFileBecameFree.Signal (& fileManagerLock)
            if open.fcb != null
-              fcb.Release(&fileManagerLock)
+              open.fcb.Release(&fileManagerLock)
            endIf
         endIf
         fileManagerLock.Unlock()
@@ -4011,12 +4029,12 @@ code Kernel
           return null
        endIf
        if !dir.AddEntry(inum, filename)
-          self.FreeInode(inumber)
+          self.FreeInode(inum)
           return null
        endIf
       fcb = fileManager.GetFCB(inum)
       if fcb == null
-         self.FreeInode(inumber)
+         self.FreeInode(inum)
          return null
       endIf
       fcb.inode.nlinks = 1 -- number of directory entries, file is 1
@@ -4038,12 +4056,12 @@ code Kernel
 
     method MakeDir (dirname: String) returns int
       var lastElStart: int
-           curDir: ptr to OpenFile
+           parentDir: ptr to OpenFile
            workdir: ptr to OpenFile = currentThread.myProcess.workingDir
-           inumber, len: int
-           name: array [ MAX_STRING_SIZE ] of char
+           inumber, len, ix: int
+           name, lastElName: array [ MAX_STRING_SIZE ] of char
            thisFCB: ptr to FileControlBlock
-           paddr: ptr to AddrSpace = currentThread.myProcess.addrSpace
+           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
            parentInumber: int
            pOpen: ptr to OpenFile
       
@@ -4052,46 +4070,45 @@ code Kernel
          return -1
       endIf
      
-      curDir = fileSystem.OpenLastDir(name, workdir, &lastElStart)
-      if curDir == null
+      parentDir = fileSystem.OpenLastDir(&name, workdir, &lastElStart)
+      if parentDir== null
          return -1
       endIf
-      if (curDir.flags & O_WRITE) != O_WRITE
+      if (parentDir.flags & O_WRITE) != O_WRITE
          return -1
       endIf
-      *((&lastElName) asPtrTo int) = NewName arraySize - lastElStart
-      for ix = 0 to NewName arraySize - lastElStart -1
-          lastElName[ix] = NewName[lastElStart+ix]
+      *((&lastElName) asPtrTo int) = name arraySize - lastElStart
+      for ix = 0 to name arraySize - lastElStart -1
+          lastElName[ix] = name[lastElStart+ix]
       endFor
       inumber = self.AllocInode()
-      if inum == -1
-         return null
+      if inumber == -1
+         return -1
       endIf
-      if !curDir.AddEntry(inumber, &lastElName)
+      if !parentDir.AddEntry(inumber, &lastElName)
           self.FreeInode(inumber)
           return -1
       endIf
-      curDir.fcb.inode.nlinks = curDir.fcb.inode.nlinks + 1
-      parentInumber = curDir.fcb.inode.number
-     -- fileManager.Close(curDir)
+      parentInumber = parentDir.fcb.inode.number
+     -- fileManager.Close(parentDir)
       thisFCB = fileManager.GetFCB(inumber)
       if thisFCB == null
          self.FreeInode(inumber)
-         fileManager.Close(curDir)
+         fileManager.Close(parentDir)
          return -1
       endIf
       -- adding entries . and .. to new dir
       if len + 3 > MAX_STRING_SIZE -- not enough space to add . and ..
           self.FreeInode(inumber)
-          fileManager.Close(curDir)
+          fileManager.Close(parentDir)
           return -1
        endIf
-      name[len] = '\'
+      name[len] = '\\'
        -- get a OpenFile for new directory
       pOpen = fileManager.GetAnOpenFile(true)
       if pOpen == null
          self.FreeInode(inumber)
-         fileManager.Close(curDir)
+         fileManager.Close(parentDir)
          fileManager.fileManagerLock.Lock()
          thisFCB.Release(&fileManager.fileManagerLock)
          fileManager.fileManagerLock.Unlock()
@@ -4102,16 +4119,31 @@ code Kernel
       fileManager.fileManagerLock.Unlock()
       -- add . link to itself
       name[len+1] = '.'
-      pOpen.AddEntry(inumber, &name) 
+      if !pOpen.AddEntry(inumber, &name)
+         self.FreeInode(inumber)
+         fileManager.Close(pOpen)
+         fileManager.Close(parentDir)
+         fileManager.fileManagerLock.Lock()
+         thisFCB.Release(&fileManager.fileManagerLock)
+         fileManager.fileManagerLock.Unlock()
+         return -1
+      endIf 
       thisFCB.inode.nlinks = 1
       -- add .. link to parent directory
       name[len+2] = '.'
-      pOpen.AddEntry(parentInumber, &name)
-      thisFCB.inode.nlinks = 2  ---------------------------------should be 3 ?
-      curDir.fcb.inode.nlinks = curDir.fcb.inode.nlinks + 1
-      curDir.fcb.inode.WriteInode()
-      fileManager.Close(curDir)
-      fileManager.Close(pOPen)
+      if !pOpen.AddEntry(parentInumber, &name)
+         self.FreeInode(inumber)
+         fileManager.Close(pOpen)
+         fileManager.Close(parentDir)
+         fileManager.fileManagerLock.Lock()
+         thisFCB.Release(&fileManager.fileManagerLock)
+         fileManager.fileManagerLock.Unlock()
+         return -1
+      endIf 
+      parentDir.fcb.inode.nlinks = parentDir.fcb.inode.nlinks + 1
+      parentDir.fcb.inode.WriteInode()
+      fileManager.Close(parentDir)
+      fileManager.Close(pOpen)
       thisFCB.inode.WriteInode()
       fileManager.fileManagerLock.Lock()
       thisFCB.Release(&fileManager.fileManagerLock)
@@ -4122,8 +4154,111 @@ code Kernel
       --------------- ToyFs . RemoveDir  ----------------
 
     method RemoveDir (dirname: String) returns int
-        FatalError ("ToyFs . MakeDir Not Implemented.")
+       --
+       -- RemoveDir removes the directory
+       --
+       var lastElStart,ix: int
+           curDir: ptr to OpenFile
+           parDir: ptr to OpenFile
+           workdir: ptr to OpenFile = currentThread.myProcess.workingDir
+           inumber, len: int
+           name: array [ MAX_STRING_SIZE ] of char
+           parName: ptr to array [MAX_STRING_SIZE] of char
+           lastElName: array [256] of char
+           thisFCB, parentFcb: ptr to FileControlBlock
+           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+           entry: dirEntry
+           pEntry: ptr to dirEntry
+      
+       len = paddr.GetStringFromVirtual(&name,dirname asInteger,MAX_STRING_SIZE)
+       if len < 0
          return -1
+       endIf
+      
+       inumber = self.NameToInodeNum(&name,workdir)
+       if inumber == -1 -- file not exist
+          return -1
+       endIf
+       thisFCB = fileManager.GetFCB(inumber)
+       if thisFCB == null
+          return -1
+       endIf
+       -- check contain only  . and .. directories
+       if thisFCB.inode.fsize > entSize(1) + entSize(2)
+          fileManager.fileManagerLock.Lock()
+          thisFCB.Release(&fileManager.fileManagerLock)
+          fileManager.fileManagerLock.Unlock()
+          return -1
+       endIf
+       -- following steps are trying to decrease nlinks of parent Dir
+       -- first get openfile of current directory
+       curDir = fileSystem.OpenLastDir(&name,workdir, &lastElStart)
+       if curDir == null
+          fileManager.fileManagerLock.Lock()
+          thisFCB.Release(&fileManager.fileManagerLock)
+          fileManager.fileManagerLock.Unlock()
+	  return -1
+       endIf
+       -- check if writable
+       if (curDir.flags & O_WRITE) != O_WRITE
+          fileManager.Close(curDir)
+          fileManager.fileManagerLock.Lock()
+          thisFCB.Release(&fileManager.fileManagerLock)
+          fileManager.fileManagerLock.Unlock()
+	  return -1
+       endIf
+       -- obtain the entry of parent Dir of current Dir
+       parName = ".." 
+       pEntry = curDir.Lookup(parName)
+       if pEntry == null
+          fileManager.Close(curDir)
+          fileManager.fileManagerLock.Lock()
+          thisFCB.Release(&fileManager.fileManagerLock)
+          fileManager.fileManagerLock.Unlock()
+          return -1
+       endIf
+       fileManager.Close(curDir)
+       -- Get FCB of parent Dir from inode number
+       parentFcb = fileManager.GetFCB(pEntry.inodeNum)
+       if parentFcb == null
+          fileManager.Close(curDir)
+          fileManager.fileManagerLock.Lock()
+          thisFCB.Release(&fileManager.fileManagerLock)
+          fileManager.fileManagerLock.Unlock()
+          return -1
+       endIf
+       -- decrease the nlinks of parent Directory
+       parentFcb.inode.nlinks = parentFcb.inode.nlinks -1
+       parentFcb.inode.WriteInode()      
+       
+       --following steps are trying to delete current Directory
+       -- set its nlinks to 0 to release all data blocks
+       thisFCB.inode.nlinks = 0
+       fileManager.fileManagerLock.Lock()
+       thisFCB.Release(&fileManager.fileManagerLock)
+       fileManager.fileManagerLock.Unlock()
+       
+       -- Deleting this Directory from its parent directory  
+       parDir = fileManager.GetAnOpenFile(true)
+       if parDir == null
+	 return -1
+       endIf
+       fileManager.fileManagerLock.Lock()
+       parDir.Init(DIRECTORY,parentFcb, O_READ|O_WRITE) 
+       parentFcb.Release(&fileManager.fileManagerLock)
+       fileManager.fileManagerLock.Unlock()
+       *((&lastElName) asPtrTo int) = name arraySize - lastElStart
+       for ix = 0 to name arraySize - lastElStart -1
+         lastElName[ix] = name[lastElStart+ix]
+       endFor
+       entry = new dirEntry { inodeNum=inumber, name=lastElName}
+       if !parDir.RemoveEntry(&lastElName, &entry)
+          fileManager.Close(parDir)
+	  return -1
+       endIf
+       fileManager.Close(parDir)
+       -- End of deletion
+       return 1
       endMethod
 
       --------------- ToyFs . Link  ----------------
@@ -4135,7 +4270,7 @@ code Kernel
            inumber, ix, len: int
            OldName,NewName, lastElName: array [ MAX_STRING_SIZE ] of char
            thisFCB: ptr to FileControlBlock
-           paddr: ptr to AddrSpace = currentThread.myProcess.addrSpace
+           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
       
       len = paddr.GetStringFromVirtual(&OldName,oldname asInteger,MAX_STRING_SIZE)
       if len < 0
@@ -4145,11 +4280,11 @@ code Kernel
       if len < 0
          return -1
       endIf
-      inumber = self.NameToInodeNum(OldName,workdir)
+      inumber = self.NameToInodeNum(&OldName,workdir)
       if inumber == -1 -- old file not exist
          return -1
       endIf
-      curDir = fileSystem.OpenLastDir(NewName,workdir, &lastElStart)
+      curDir = fileSystem.OpenLastDir(&NewName,workdir, &lastElStart)
       if curDir == null
          return -1
       endIf
@@ -4163,8 +4298,8 @@ code Kernel
       if !curDir.AddEntry(inumber, &lastElName)
           return -1
       endIf
-      curDir.fcb.inode.nlinks = curDir.fcb.inode.nlinks + 1
-      curDir.fcb.inode.Write()
+     -- curDir.fcb.inode.nlinks = curDir.fcb.inode.nlinks + 1
+     -- curDir.fcb.inode.Write()
       fileManager.Close(curDir)
       thisFCB = fileManager.GetFCB(inumber)
       if thisFCB == null
@@ -4182,8 +4317,58 @@ code Kernel
       --------------- ToyFs .Unlink   ----------------
 
     method Unlink (filename: String) returns int
-        FatalError ("ToyFs . MakeDir Not Implemented.")
+       --
+       -- unlink removes the link in the directory
+       --
+       -- should only unlink file rather than directory
+       var lastElStart,ix: int
+           curDir: ptr to OpenFile
+           workdir: ptr to OpenFile = currentThread.myProcess.workingDir
+           inumber, len: int
+           name: array [ MAX_STRING_SIZE ] of char
+           lastElName: array [256] of char
+           thisFCB: ptr to FileControlBlock
+           paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+           entry: dirEntry
+      
+       len = paddr.GetStringFromVirtual(&name,filename asInteger,MAX_STRING_SIZE)
+       if len < 0
          return -1
+       endIf
+      
+       inumber = self.NameToInodeNum(&name,workdir)
+       if inumber == -1 -- file not exist
+          return -1
+       endIf
+       thisFCB = fileManager.GetFCB(inumber)
+       if thisFCB == null
+          return -1
+       endIf
+       thisFCB.inode.nlinks = thisFCB.inode.nlinks - 1
+       thisFCB.inode.WriteInode()
+       fileManager.fileManagerLock.Lock()
+       thisFCB.Release(&fileManager.fileManagerLock)
+       fileManager.fileManagerLock.Unlock()
+       if thisFCB.inode.nlinks <= 0   -- file data blocks are deleted
+          && thisFCB.numberOfUsers <= 0      
+	 curDir = fileSystem.OpenLastDir(&name,workdir, &lastElStart)
+	 if curDir == null
+	   return -1
+	 endIf
+	 if (curDir.flags & O_WRITE) != O_WRITE
+	   return -1
+	 endIf
+	 *((&lastElName) asPtrTo int) = name arraySize - lastElStart
+	 for ix = 0 to name arraySize - lastElStart -1
+	     lastElName[ix] = name[lastElStart+ix]
+	 endFor
+	 entry = new dirEntry { inodeNum=inumber, name=lastElName}
+	 if !curDir.RemoveEntry(&lastElName, &entry)
+	     return -1
+	 endIf
+	endIf
+        fileManager.Close(curDir)
+        return 1
       endMethod
 
   endBehavior
@@ -4571,8 +4756,25 @@ code Kernel
       -- Must be called with fileManagerLock locked.
 
       method Release (lock: ptr to Mutex)
+         var i: int
          numberOfUsers = numberOfUsers - 1
          if numberOfUsers <= 0
+            if inode.nlinks <= 0
+              -- free direct blocks
+               for i = 0 to 9
+                  if inode.direct[i] != 0
+                     fileSystem.FreeDataBlock(inode.direct[i])
+                     inode.direct[i] = 0
+                  endIf
+               endFor
+              -- free indirect blocks
+               if inode.indir1 > 0 && inode.balloc > 0 && inode.indSec > 0
+        	  for i=0 to inode.balloc-1
+		    fileSystem.FreeDataBlock(*((inode.indSec + i*4) asPtrTo int))
+		  endFor
+               endIf
+               fileSystem.FreeInode(inode.number)
+            endIf
 	    -- Final close, mark unused and release any indirect frame
 	    relativeSectorInBuffer = -1
 	    inode.FreeIndirect ()
@@ -5181,6 +5383,8 @@ code Kernel
       readQueue.Init()
       writeQueue = new Condition
       writeQueue.Init()
+      readClosed = true
+      writeClosed = true
     endMethod
   ----------------------------- Pipe.Open ----------------------------------
     method Open() returns bool
@@ -5190,15 +5394,19 @@ code Kernel
       endIf
       head = bufferFrame
       tail = bufferFrame
+      readClosed = false
+      writeClosed = false
       return true
     endMethod
   ----------------------------- Pipe.Read ----------------------------------
     method Read (buffer:ptr to char, sizeInBytes: int) returns int
+       var pBuffer: int
        if buffer == null
           || sizeInBytes <= 0
           || sizeInBytes > charsInPipe
           return -1
        endIf       
+       pBuffer = buffer asInteger
        pipeMutex.Lock()
        if charsInPipe == 0 && !readWait
           pipeMutex.Unlock()
@@ -5207,7 +5415,7 @@ code Kernel
        while charsInPipe == 0--buffer is empty
           readQueue.Wait(&pipeMutex)
        endWhile
-       MemoryCopy(buffer asInteger, tail, sizeInBytes)
+       MemoryCopy(pBuffer, tail, sizeInBytes)
        tail = (tail + sizeInBytes) % PAGE_SIZE
        charsInPipe = charsInPipe - sizeInBytes
        writeQueue.Broadcast(&pipeMutex)
@@ -5241,7 +5449,7 @@ code Kernel
           MemoryCopy(head, pBuffer, chunkSize)
           pBuffer = pBuffer + chunkSize
           head = (head + sizeInBytes) % PAGE_SIZE
-          charsInPipe = charsInPipe + sizeInBytes
+          charsInPipe = charsInPipe + chunkSize
           copied = copied + chunkSize
           chunkSize = sizeInBytes - copied
       endWhile
@@ -5250,9 +5458,20 @@ code Kernel
        return copied
     endMethod
   ----------------------------- Pipe.Close ----------------------------------
-    method Close()
-      frameManager.PutAFrame(bufferFrame)
-      bufferFrame = -1
+    method Close(flag: int)
+      pipeMutex.Lock()
+      if (flag & O_READ) == O_READ
+           readClosed = true
+      endIf
+      if (flag & O_WRITE) == O_WRITE
+           writeClosed = true
+      endIf
+      if readClosed && writeClosed
+         frameManager.PutAFrame(bufferFrame)
+         bufferFrame = -1
+      endIf
+      pipeMutex.Unlock()
     endMethod
+    
   endBehavior
 endCode
