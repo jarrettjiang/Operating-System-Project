@@ -112,6 +112,7 @@ header Kernel
     Handle_Sys_Unlink (filename: String) returns int
     Handle_Sys_Mkdir (filename: String) returns int
     Handle_Sys_Rmdir (filename: String) returns int
+    Handle_Sys_Chdir (filename: String) returns int
 
     InitializeScheduler ()
     Run (nextThread: ptr to Thread)

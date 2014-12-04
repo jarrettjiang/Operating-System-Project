@@ -1871,6 +1871,8 @@ code Kernel
           return Handle_Sys_Mkdir (arg1 asPtrTo array of char)
         case SYSCALL_RMDIR:
           return Handle_Sys_Rmdir (arg1 asPtrTo array of char)
+        case SYSCALL_CHDIR:
+          return Handle_Sys_Chdir (arg1 asPtrTo array of char)
         case SYSCALL_CLOSE:
           Handle_Sys_Close (arg1)
           return 0
@@ -2524,12 +2526,6 @@ code Kernel
          if pOpen.pipe == null
            return -1
         endIf
-        pOpen.pipe.pipeMutex.Lock()
-        if pOpen.pipe.writeClosed == true --all write end are closed
-           pOpen.pipe.pipeMutex.Unlock()
-           return 0xff
-        endIf
-        pOpen.pipe.pipeMutex.Unlock()
         virtAddr = buffer asInteger
         virtPage = virtAddr/PAGE_SIZE
         offset = virtAddr % PAGE_SIZE
@@ -2550,9 +2546,12 @@ code Kernel
            endIf
            pvirSpace.SetDirty(virtPage)
            pvirSpace.SetReferenced(virtPage)
-           phyAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset          
-           if pOpen.pipe.Read(phyAddr asPtrTo char, thisChunkSize) == -1
+           phyAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset 
+           retVal = pOpen.pipe.Read(phyAddr asPtrTo char, thisChunkSize)
+           if retVal == -1
               return -1
+           elseIf retVal < thisChunkSize  
+              return copiedSoFar + retVal  -- 0: End Of File
            endIf
            copiedSoFar = copiedSoFar + thisChunkSize 
            virtPage = virtPage + 1
@@ -2709,12 +2708,6 @@ code Kernel
         if pOpen.pipe == null
            return -1
         endIf
-        pOpen.pipe.pipeMutex.Lock()
-        if pOpen.pipe.readClosed == true --all read end are closed
-           pOpen.pipe.pipeMutex.Unlock()
-           return -1
-        endIf
-        pOpen.pipe.pipeMutex.Unlock()
         virtAddr = buffer asInteger
         virtPage = virtAddr/PAGE_SIZE
         offset = virtAddr % PAGE_SIZE
@@ -2734,7 +2727,8 @@ code Kernel
            endIf
            pvirSpace.SetReferenced(virtPage)
            phyAddr = pvirSpace.ExtractFrameAddr(virtPage) + offset
-           if pOpen.pipe.Write(phyAddr asPtrTo char, thisChunkSize) == -1
+           retVal = pOpen.pipe.Write(phyAddr asPtrTo char, thisChunkSize) 
+           if retVal == -1
               return -1
            endIf
            copiedSoFar = copiedSoFar + thisChunkSize 
@@ -2927,22 +2921,45 @@ code Kernel
 
   function  Handle_Sys_Link (oldname, newname: String) returns int
 
-     return -1
+     return fileSystem.Link(oldname, newname)
   endFunction
 -----------------------------  Handle_Sys_Unlink  ---------------------------------
 
   function Handle_Sys_Unlink (filename: String) returns int
-     return -1
+     return fileSystem.Unlink(filename)
   endFunction
   -----------------------------  Handle_Sys_Mkdir  ---------------------------------
 
   function Handle_Sys_Mkdir (filename: String) returns int
-     return -1
+     return fileSystem.MakeDir(filename)
   endFunction
   -----------------------------  Handle_Sys_Rmdir  ---------------------------------
 
   function Handle_Sys_Rmdir (filename: String) returns int
-     return -1
+     return fileSystem.RemoveDir(filename)
+  endFunction
+  -----------------------------  Handle_Sys_Chdir  ---------------------------------
+
+  function Handle_Sys_Chdir (filename: String) returns int
+    var thisDir: ptr to OpenFile
+        workdir: ptr to OpenFile = currentThread.myProcess.workingDir
+        len: int
+        name: array [ MAX_STRING_SIZE ] of char
+        paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
+      len = paddr.GetStringFromVirtual(&name,filename asInteger,MAX_STRING_SIZE)
+      if len < 0
+        return -1
+      endIf
+      thisDir = fileManager.Open(&name, workdir,O_READ, TYPE_DIR)
+      if thisDir == null
+         return -1
+      endIf
+      if thisDir.kind != DIRECTORY
+         return -1
+      endIf
+      fileManager.Close(workdir)
+      currentThread.myProcess.workingDir = thisDir
+      return 1
   endFunction
  -----------------------------  Handle_Sys_Close  ---------------------------------
 
@@ -4184,7 +4201,7 @@ code Kernel
           return -1
        endIf
        -- check contain only  . and .. directories
-       if thisFCB.inode.fsize > entSize(1) + entSize(2)
+       if thisFCB.inode.fsize > entSize(1) + entSize(2) + 4 -- 4 bytes for ending "-1"
           fileManager.fileManagerLock.Lock()
           thisFCB.Release(&fileManager.fileManagerLock)
           fileManager.fileManagerLock.Unlock()
@@ -5400,30 +5417,52 @@ code Kernel
     endMethod
   ----------------------------- Pipe.Read ----------------------------------
     method Read (buffer:ptr to char, sizeInBytes: int) returns int
+       --
+       -- read from pipe to buffer
+       --
        var pBuffer: int
+           chunkSize, copied: int
        if buffer == null
           || sizeInBytes <= 0
-          || sizeInBytes > charsInPipe
           return -1
        endIf       
        pBuffer = buffer asInteger
-       pipeMutex.Lock()
-       if charsInPipe == 0 && !readWait
-          pipeMutex.Unlock()
-          return -1
-       endIf
-       while charsInPipe == 0--buffer is empty
-          readQueue.Wait(&pipeMutex)
-       endWhile
-       MemoryCopy(pBuffer, tail, sizeInBytes)
-       tail = (tail + sizeInBytes) % PAGE_SIZE
-       charsInPipe = charsInPipe - sizeInBytes
-       writeQueue.Broadcast(&pipeMutex)
-       pipeMutex.Unlock()
-       return 0
+       copied = 0
+       while copied < sizeInBytes
+         pipeMutex.Lock()
+         if writeClosed && charsInPipe == 0 -- end of file
+            pipeMutex.Unlock()
+            return copied
+         endIf
+         if charsInPipe == 0 && !readWait
+            pipeMutex.Unlock()
+            return -1
+         endIf
+         while charsInPipe == 0--buffer is empty
+             readQueue.Wait(&pipeMutex)
+             if writeClosed && charsInPipe == 0 -- end of file
+                pipeMutex.Unlock()
+                return copied
+             endIf
+         endWhile
+         chunkSize = sizeInBytes - copied
+         if chunkSize > charsInPipe
+            chunkSize = charsInPipe
+         endIf
+         MemoryCopy(pBuffer, tail, chunkSize)
+         copied = copied + chunkSize
+         tail = bufferFrame + ((tail-bufferFrame) + chunkSize) % PAGE_SIZE
+         charsInPipe = charsInPipe - chunkSize
+         writeQueue.Broadcast(&pipeMutex)
+         pipeMutex.Unlock()
+       endWhile  
+       return copied
     endMethod
   ----------------------------- Pipe.Write ----------------------------------
     method Write (buffer: ptr to char, sizeInBytes: int) returns int
+       --
+       -- write from buffer to pipe
+       --
        var chunkSize, copied: int
            pBuffer: int
        if buffer == null
@@ -5434,27 +5473,35 @@ code Kernel
        pBuffer = buffer asInteger
        copied = 0
        chunkSize = sizeInBytes - copied
-       pipeMutex.Lock()
-       if charsInPipe == PAGE_SIZE && !writeWait
-          pipeMutex.Unlock()
-          return -1
-       endIf
        while copied < sizeInBytes
+           pipeMutex.Lock()
+           if charsInPipe == PAGE_SIZE && readClosed
+              pipeMutex.Unlock()
+              return -1
+           endIf
+           if charsInPipe == PAGE_SIZE && !writeWait
+             pipeMutex.Unlock()
+            return -1
+          endIf
           while charsInPipe == PAGE_SIZE --buffer is full
              writeQueue.Wait(&pipeMutex)
+             if charsInPipe == PAGE_SIZE && readClosed
+                pipeMutex.Unlock()
+                return -1
+             endIf
           endWhile
           if chunkSize > PAGE_SIZE - charsInPipe
              chunkSize = PAGE_SIZE - charsInPipe
           endIf
           MemoryCopy(head, pBuffer, chunkSize)
           pBuffer = pBuffer + chunkSize
-          head = (head + sizeInBytes) % PAGE_SIZE
+          head = bufferFrame + ((head-bufferFrame) + sizeInBytes) % PAGE_SIZE
           charsInPipe = charsInPipe + chunkSize
           copied = copied + chunkSize
           chunkSize = sizeInBytes - copied
-      endWhile
-      readQueue.Broadcast(&pipeMutex)
-      pipeMutex.Unlock()
+         readQueue.Broadcast(&pipeMutex)
+         pipeMutex.Unlock()
+       endWhile
        return copied
     endMethod
   ----------------------------- Pipe.Close ----------------------------------
@@ -5462,9 +5509,11 @@ code Kernel
       pipeMutex.Lock()
       if (flag & O_READ) == O_READ
            readClosed = true
+           writeQueue.Broadcast(&pipeMutex)
       endIf
       if (flag & O_WRITE) == O_WRITE
            writeClosed = true
+           readQueue.Broadcast(&pipeMutex)
       endIf
       if readClosed && writeClosed
          frameManager.PutAFrame(bufferFrame)
