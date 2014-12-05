@@ -4118,7 +4118,6 @@ code Kernel
           return -1
       endIf
       parentInumber = parentDir.fcb.inode.number
-     -- fileManager.Close(parentDir)
       thisFCB = fileManager.GetFCB(inumber)
       if thisFCB == null
          self.FreeInode(inumber)
@@ -4129,6 +4128,7 @@ code Kernel
       thisFCB.inode.mode = TYPE_DIR|MODE_READ|MODE_WRITE
       thisFCB.inode.nlinks = 1 -- one link for itself
       fsLock.Unlock()
+
       -- adding entries . and .. to new dir
        -- get a OpenFile for new directory     
       pOpen = fileManager.GetAnOpenFile(true)
@@ -4143,9 +4143,6 @@ code Kernel
       fileManager.fileManagerLock.Lock()
       pOpen.Init(DIRECTORY, thisFCB, O_READ|O_WRITE)
       fileManager.fileManagerLock.Unlock()
-      --
-      
-
       if thisFCB.relativeSectorInBuffer != 0
 	 -- print ("Need to load new sector!\n")
 	 if !thisFCB.ReadSector(0, true)
@@ -4159,8 +4156,8 @@ code Kernel
       thisFCB.inode.fsize = thisFCB.inode.fsize + 4
       thisFCB.inode.dirty = true
       fsLock.Unlock()
+
       -- add . link to itself
---      name[len+1] = '.'
       tmpName = "."
       if !pOpen.AddEntry(inumber, tmpName)
          self.FreeInode(inumber)
@@ -4170,12 +4167,14 @@ code Kernel
          thisFCB.Release(&fileManager.fileManagerLock)
          fileManager.fileManagerLock.Unlock()
          return -1
-      endIf 
+      endIf
+ 
       -- add a link to itself
       fsLock.Lock()
       thisFCB.inode.nlinks = thisFCB.inode.nlinks + 1
       thisFCB.inode.dirty = true
       fsLock.Unlock()
+      
       -- add .. link to parent directory
       tmpName = ".."
       if !pOpen.AddEntry(parentInumber, tmpName)
@@ -4208,17 +4207,14 @@ code Kernel
        -- RemoveDir removes the directory
        --
        var lastElStart,ix: int
-           curDir: ptr to OpenFile
            parDir: ptr to OpenFile
            workdir: ptr to OpenFile = currentThread.myProcess.workingDir
            inumber, len: int
            name: array [ MAX_STRING_SIZE ] of char
-           parName: ptr to array [MAX_STRING_SIZE] of char
            lastElName: array [255] of char
-           thisFCB, parentFcb: ptr to FileControlBlock
+           thisFCB: ptr to FileControlBlock
            paddr: ptr to AddrSpace = &currentThread.myProcess.addrSpace
            entry: ptr to dirEntry
-           pEntry: ptr to dirEntry
       
        len = paddr.GetStringFromVirtual(&name,dirname asInteger,MAX_STRING_SIZE)
        if len < 0
@@ -4240,48 +4236,21 @@ code Kernel
           fileManager.fileManagerLock.Unlock()
           return -1
        endIf
-       -- following steps are trying to decrease nlinks of parent Dir
-       -- first get openfile of current directory
-       curDir = fileSystem.OpenLastDir(&name,workdir, &lastElStart)
-       if curDir == null
+       parDir = fileSystem.OpenLastDir(&name,workdir, &lastElStart)
+       if parDir == null
           fileManager.fileManagerLock.Lock()
           thisFCB.Release(&fileManager.fileManagerLock)
           fileManager.fileManagerLock.Unlock()
 	  return -1
        endIf
        -- check if writable
-       if (curDir.fcb.inode.mode & MODE_WRITE) != MODE_WRITE
-          fileManager.Close(curDir)
+       if (parDir.fcb.inode.mode & MODE_WRITE) != MODE_WRITE
+          fileManager.Close(parDir)
           fileManager.fileManagerLock.Lock()
           thisFCB.Release(&fileManager.fileManagerLock)
           fileManager.fileManagerLock.Unlock()
 	  return -1
        endIf
-       -- obtain the entry of parent Dir of current Dir
-       parName = ".." 
-       pEntry = curDir.Lookup(parName)
-       if pEntry == null
-          fileManager.Close(curDir)
-          fileManager.fileManagerLock.Lock()
-          thisFCB.Release(&fileManager.fileManagerLock)
-          fileManager.fileManagerLock.Unlock()
-          return -1
-       endIf
-       fileManager.Close(curDir)
-       -- Get FCB of parent Dir from inode number
-       parentFcb = fileManager.GetFCB(pEntry.inodeNum)
-       if parentFcb == null
-          fileManager.fileManagerLock.Lock()
-          thisFCB.Release(&fileManager.fileManagerLock)
-          fileManager.fileManagerLock.Unlock()
-          return -1
-       endIf
-       -- decrease the nlinks of parent Directory
-       fileSystem.fsLock.Lock()
-       parentFcb.inode.nlinks = parentFcb.inode.nlinks -1
-       parentFcb.inode.dirty = true
-       fileSystem.fsLock.Unlock()
-       parentFcb.inode.WriteInode()      
        
        --following steps are trying to delete current Directory
        -- set its nlinks to 0 to release all data blocks
@@ -4292,15 +4261,14 @@ code Kernel
        thisFCB.Release(&fileManager.fileManagerLock)
        fileManager.fileManagerLock.Unlock()
        
+       -- decrease the nlinks of parent Directory
+       fsLock.Lock()
+       parDir.fcb.inode.nlinks = parDir.fcb.inode.nlinks -1
+       parDir.fcb.inode.dirty = true
+       fsLock.Unlock()
+       parDir.fcb.inode.WriteInode()      
+
        -- Deleting this Directory from its parent directory  
-       parDir = fileManager.GetAnOpenFile(true)
-       if parDir == null
-	 return -1
-       endIf
-       fileManager.fileManagerLock.Lock()
-       parDir.Init(DIRECTORY,parentFcb, O_READ|O_WRITE) 
-       parentFcb.Release(&fileManager.fileManagerLock)
-       fileManager.fileManagerLock.Unlock()
        *((&lastElName) asPtrTo int) = name arraySize - lastElStart
        for ix = 0 to name arraySize - lastElStart -1
          lastElName[ix] = name[lastElStart+ix]
@@ -4356,8 +4324,6 @@ code Kernel
       if !curDir.AddEntry(inumber, &lastElName)
           return -1
       endIf
-     -- curDir.fcb.inode.nlinks = curDir.fcb.inode.nlinks + 1
-     -- curDir.fcb.inode.Write()
       fileManager.Close(curDir)
       thisFCB = fileManager.GetFCB(inumber)
       if thisFCB == null
@@ -4418,28 +4384,28 @@ code Kernel
        fileManager.fileManagerLock.Lock()
        thisFCB.Release(&fileManager.fileManagerLock)
        fileManager.fileManagerLock.Unlock()         
-	 curDir = fileSystem.OpenLastDir(&name,workdir, &lastElStart)
-	 if curDir == null
+       curDir = fileSystem.OpenLastDir(&name,workdir, &lastElStart)
+       if curDir == null
 	   return -1
-	 endIf
-	 if (curDir.fcb.inode.mode & MODE_WRITE) != MODE_WRITE
+       endIf
+       if (curDir.fcb.inode.mode & MODE_WRITE) != MODE_WRITE
 	   return -1
-	 endIf
-	 *((&lastElName) asPtrTo int) = name arraySize - lastElStart
-	 for ix = 0 to name arraySize - lastElStart -1
-	     lastElName[ix] = name[lastElStart+ix]
-	 endFor
-	 entry = curDir.Lookup(&lastElName)
-	 if entry == null
-	    fileManager.Close(curDir)
-	    return -1
-	 endIf
-	 if !curDir.RemoveEntry(&lastElName, entry)
-	     fileManager.Close(curDir)
-	     return -1
-	 endIf
-	fileManager.Close(curDir)
-        return 0
+       endIf
+       *((&lastElName) asPtrTo int) = name arraySize - lastElStart
+       for ix = 0 to name arraySize - lastElStart -1
+           lastElName[ix] = name[lastElStart+ix]
+       endFor
+       entry = curDir.Lookup(&lastElName)
+       if entry == null
+          fileManager.Close(curDir)
+          return -1
+       endIf
+       if !curDir.RemoveEntry(&lastElName, entry)
+          fileManager.Close(curDir)
+          return -1
+       endIf
+       fileManager.Close(curDir)
+       return 0
       endMethod
 
   endBehavior
